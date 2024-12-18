@@ -7,8 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestLibwasmvmVersion(t *testing.T) {
-	version, err := LibwasmvmVersion()
-	require.NoError(t, err)
-	require.Regexp(t, regexp.MustCompile(`^([0-9]+)\.([0-9]+)\.([0-9]+)(-[a-z0-9.]+)?$`), version)
+func TestGetVersion(t *testing.T) {
+	version := GetVersion()
+	require.Regexp(t, regexp.MustCompile(`^v([0-9]+)\.([0-9]+)\.([0-9]+)(-[a-z0-9.]+)?$`), version)
 }

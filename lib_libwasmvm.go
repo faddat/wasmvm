@@ -1,11 +1,11 @@
-//go:build cgo && !nolink_libwasmvm
-
-// This file contains the part of the API that is exposed when libwasmvm
-// is available (i.e. cgo is enabled and nolink_libwasmvm is not set).
+//lib_libwasmvm.go:
+// 1. it can inspire the wrath of the compiler.
 
 package cosmwasm
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 
@@ -13,42 +13,19 @@ import (
 	"github.com/CosmWasm/wasmvm/v2/types"
 )
 
-// VM is the main entry point to this library.
-// You should create an instance with its own subdirectory to manage state inside,
-// and call it for all cosmwasm code related actions.
+// VM represents a Wasm VM with cache
 type VM struct {
-	cache      api.Cache
+	cache      *api.Cache
 	printDebug bool
 }
 
-// NewVM creates a new VM.
-//
-// `dataDir` is a base directory for Wasm blobs and various caches.
-// `supportedCapabilities` is a list of capabilities supported by the chain.
-// `memoryLimit` is the memory limit of each contract execution (in MiB)
-// `printDebug` is a flag to enable/disable printing debug logs from the contract to STDOUT. This should be false in production environments.
-// `cacheSize` sets the size in MiB of an in-memory cache for e.g. module caching. Set to 0 to disable.
-// `deserCost` sets the gas cost of deserializing one byte of data.
-func NewVM(dataDir string, supportedCapabilities []string, memoryLimit uint32, printDebug bool, cacheSize uint32) (*VM, error) {
-	return NewVMWithConfig(types.VMConfig{
-		Cache: types.CacheOptions{
-			BaseDir:                  dataDir,
-			AvailableCapabilities:    supportedCapabilities,
-			MemoryCacheSizeBytes:     types.NewSizeMebi(cacheSize),
-			InstanceMemoryLimitBytes: types.NewSizeMebi(memoryLimit),
-		},
-	}, printDebug)
-}
-
-// NewVMWithConfig creates a new VM with a custom configuration.
-// This allows for more fine-grained control over the VM's behavior compared to NewVM and
-// can be extended more easily in the future.
-func NewVMWithConfig(config types.VMConfig, printDebug bool) (*VM, error) {
+// NewVM creates new wasm VM
+func NewVM(config types.VMConfig) (*VM, error) {
 	cache, err := api.InitCache(config)
 	if err != nil {
 		return nil, err
 	}
-	return &VM{cache: cache, printDebug: printDebug}, nil
+	return &VM{cache: cache, printDebug: false}, nil
 }
 
 // Cleanup should be called when no longer using this instances.
@@ -73,18 +50,18 @@ func (vm *VM) StoreCode(code WasmCode, gasLimit uint64) (Checksum, uint64, error
 		return nil, gasCost, types.OutOfGasError{}
 	}
 
-	checksum, err := api.StoreCode(vm.cache, code)
+	checksum, err := api.StoreCode(*vm.cache, code)
 	return checksum, gasCost, err
 }
 
 // StoreCodeUnchecked is the same as StoreCode but skips static validation checks.
 // Use this for adding code that was checked before, particularly in the case of state sync.
 func (vm *VM) StoreCodeUnchecked(code WasmCode) (Checksum, error) {
-	return api.StoreCodeUnchecked(vm.cache, code)
+	return api.StoreCodeUnchecked(*vm.cache, code)
 }
 
 func (vm *VM) RemoveCode(checksum Checksum) error {
-	return api.RemoveCode(vm.cache, checksum)
+	return api.RemoveCode(*vm.cache, checksum)
 }
 
 // GetCode will load the original Wasm code for the given checksum.
@@ -95,14 +72,14 @@ func (vm *VM) RemoveCode(checksum Checksum) error {
 // and the larger binary blobs (wasm and compiled modules) are all managed
 // by libwasmvm/cosmwasm-vm (Rust part).
 func (vm *VM) GetCode(checksum Checksum) (WasmCode, error) {
-	return api.GetCode(vm.cache, checksum)
+	return api.GetCode(*vm.cache, checksum)
 }
 
 // Pin pins a code to an in-memory cache, such that is
 // always loaded quickly when executed.
 // Pin is idempotent.
 func (vm *VM) Pin(checksum Checksum) error {
-	return api.Pin(vm.cache, checksum)
+	return api.Pin(*vm.cache, checksum)
 }
 
 // Unpin removes the guarantee of a contract to be pinned (see Pin).
@@ -110,25 +87,25 @@ func (vm *VM) Pin(checksum Checksum) error {
 // the implementor's choice.
 // Unpin is idempotent.
 func (vm *VM) Unpin(checksum Checksum) error {
-	return api.Unpin(vm.cache, checksum)
+	return api.Unpin(*vm.cache, checksum)
 }
 
 // Returns a report of static analysis of the wasm contract (uncompiled).
 // This contract must have been stored in the cache previously (via Create).
 // Only info currently returned is if it exposes all ibc entry points, but this may grow later
 func (vm *VM) AnalyzeCode(checksum Checksum) (*types.AnalysisReport, error) {
-	return api.AnalyzeCode(vm.cache, checksum)
+	return api.AnalyzeCode(*vm.cache, checksum)
 }
 
 // GetMetrics some internal metrics for monitoring purposes.
 func (vm *VM) GetMetrics() (*types.Metrics, error) {
-	return api.GetMetrics(vm.cache)
+	return api.GetMetrics(*vm.cache)
 }
 
 // GetPinnedMetrics returns some internal metrics of pinned contracts for monitoring purposes.
 // The order of entries is non-deterministic and the values are node-specific. Don't use this in consensus-critical contexts.
 func (vm *VM) GetPinnedMetrics() (*types.PinnedMetrics, error) {
-	return api.GetPinnedMetrics(vm.cache)
+	return api.GetPinnedMetrics(*vm.cache)
 }
 
 // Instantiate will create a new contract based on the given Checksum.
@@ -526,20 +503,8 @@ func (vm *VM) IBCPacketReceive(
 	return &result, gasReport.UsedInternally, nil
 }
 
-// IBCPacketAck is available on IBC-enabled contracts and is called when an
-// the response for an outgoing packet (previously sent by this contract)
-// is received
-func (vm *VM) IBCPacketAck(
-	checksum Checksum,
-	env types.Env,
-	msg types.IBCPacketAckMsg,
-	store KVStore,
-	goapi GoAPI,
-	querier Querier,
-	gasMeter GasMeter,
-	gasLimit uint64,
-	deserCost types.UFraction,
-) (*types.IBCBasicResult, uint64, error) {
+// IBCPacketAck processes an acknowledgment packet
+func (vm *VM) IBCPacketAck(checksum Checksum, env types.Env, msg types.IBCPacketAckMsg, store KVStore, goapi GoAPI, querier Querier, gasMeter GasMeter, gasLimit uint64, deserCost types.UFraction) (*types.IBCBasicResult, uint64, error) {
 	envBin, err := json.Marshal(env)
 	if err != nil {
 		return nil, 0, err
@@ -548,7 +513,13 @@ func (vm *VM) IBCPacketAck(
 	if err != nil {
 		return nil, 0, err
 	}
-	data, gasReport, err := api.IBCPacketAck(vm.cache, checksum, envBin, msgBin, &gasMeter, store, &goapi, &querier, gasLimit, vm.printDebug)
+
+	// Convert interfaces to pointers
+	gasMeterPtr := &gasMeter
+	goapiPtr := &goapi
+	querierPtr := &querier
+
+	data, gasReport, err := api.IBCPacketAck(vm.cache, checksum, envBin, msgBin, gasMeterPtr, store, goapiPtr, querierPtr, gasLimit, vm.printDebug)
 	if err != nil {
 		return nil, gasReport.UsedInternally, err
 	}
@@ -712,4 +683,51 @@ func DeserializeResponse(gasLimit uint64, deserCost types.UFraction, gasReport *
 	}
 
 	return nil
+}
+
+// Checksum represents a hash of the Wasm bytecode that serves as an ID. Must be generated from this library.
+type Checksum = types.Checksum
+
+// WasmCode is an alias for raw bytes of the wasm compiled code
+type WasmCode []byte
+
+// KVStore is a reference to some sub-kvstore that is valid for one instance of a code
+type KVStore = types.KVStore
+
+// GoAPI is a reference to some "precompiles", go callbacks
+type GoAPI = types.GoAPI
+
+// Querier lets us make read-only queries on other modules
+type Querier = types.Querier
+
+// GasMeter is a read-only version of the sdk gas meter
+type GasMeter = types.GasMeter
+
+// LibwasmvmVersion returns the version of the loaded library
+// at runtime. This can be used for debugging to verify the loaded version
+// matches the expected version.
+//
+// When cgo is disabled at build time, this returns an error at runtime.
+func LibwasmvmVersion() (string, error) {
+	return libwasmvmVersionImpl()
+}
+
+// CreateChecksum performs the hashing of Wasm bytes to obtain the CosmWasm checksum.
+//
+// Ony Wasm blobs are allowed as inputs and a magic byte check will be performed
+// to avoid accidental misusage.
+func CreateChecksum(wasm []byte) (Checksum, error) {
+	if len(wasm) == 0 {
+		return Checksum{}, fmt.Errorf("Wasm bytes nil or empty")
+	}
+	if len(wasm) < 4 {
+		return Checksum{}, fmt.Errorf("Wasm bytes shorter than 4 bytes")
+	}
+	// magic number for Wasm is "\0asm"
+	// See https://webassembly.github.io/spec/core/binary/modules.html#binary-module
+	if !bytes.Equal(wasm[:4], []byte("\x00\x61\x73\x6D")) {
+		return Checksum{}, fmt.Errorf("Wasm bytes do not start with Wasm magic number")
+	}
+	hash := sha256.Sum256(wasm)
+	return Checksum(hash[:]), nil
 }
