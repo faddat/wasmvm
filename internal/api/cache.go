@@ -66,25 +66,24 @@ func createChecksum(wasm []byte) ([]byte, error) {
 	return hash[:], nil
 }
 
-// StoreCode compiles and stores Wasm code
+// StoreCode stores a Wasm contract in the cache
 func StoreCode(cache Cache, wasm []byte) ([]byte, error) {
-	// Create checksum
-	checksum, err := createChecksum(wasm)
+	// Calculate checksum
+	checksum := sha256.Sum256(wasm)
+
+	// Store the original code
+	cache.codes.Store(string(checksum[:]), wasm)
+
+	// Compile the module
+	compiled, err := cache.runtime.CompileModule(context.Background(), wasm)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create checksum: %v", err)
+		return nil, fmt.Errorf("failed to compile module: %w", err)
 	}
 
-	// Compile module
-	module, err := cache.runtime.CompileModule(context.Background(), wasm)
-	if err != nil {
-		return nil, fmt.Errorf("failed to compile module: %v", err)
-	}
+	// Store the compiled module
+	cache.modules.Store(string(checksum[:]), compiled)
 
-	// Store module and original code
-	cache.modules.Store(string(checksum), module)
-	cache.codes.Store(string(checksum), wasm)
-
-	return checksum, nil
+	return checksum[:], nil
 }
 
 // StoreCodeUnchecked stores code without validation
@@ -100,7 +99,7 @@ func RemoveCode(cache Cache, checksum []byte) error {
 	return nil
 }
 
-// GetCode retrieves the original Wasm code
+// GetCode retrieves the original Wasm code by checksum
 func GetCode(cache Cache, checksum []byte) ([]byte, error) {
 	if code, ok := cache.codes.Load(string(checksum)); ok {
 		return code.([]byte), nil
@@ -125,11 +124,52 @@ func Unpin(cache Cache, checksum []byte) error {
 
 // AnalyzeCode performs static analysis of the code
 func AnalyzeCode(cache Cache, checksum []byte) (*types.AnalysisReport, error) {
-	// Basic analysis for now
+	// Get the code from cache
+	code, err := GetCode(cache, checksum)
+	if err != nil {
+		return nil, err
+	}
+
+	// Compile the module to analyze exports
+	compiled, err := cache.runtime.CompileModule(context.Background(), code)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compile module for analysis: %w", err)
+	}
+
+	// Check for IBC entry points
+	hasIBC := false
+	entrypoints := make([]string, 0)
+
+	// Standard entry points
+	standardEntryPoints := []string{"instantiate", "execute", "query", "migrate"}
+	for _, ep := range standardEntryPoints {
+		if _, ok := compiled.ExportedFunctions()[ep]; ok {
+			entrypoints = append(entrypoints, ep)
+		}
+	}
+
+	// IBC entry points
+	ibcEntryPoints := []string{
+		"ibc_channel_open",
+		"ibc_channel_connect",
+		"ibc_channel_close",
+		"ibc_packet_receive",
+		"ibc_packet_ack",
+		"ibc_packet_timeout",
+	}
+
+	for _, ep := range ibcEntryPoints {
+		if _, ok := compiled.ExportedFunctions()[ep]; ok {
+			hasIBC = true
+			entrypoints = append(entrypoints, ep)
+		}
+	}
+
+	// For now, we don't track required capabilities in Wazero
 	return &types.AnalysisReport{
-		HasIBCEntryPoints:      false,
+		HasIBCEntryPoints:      hasIBC,
 		RequiredCapabilities:   "",
-		Entrypoints:            []string{},
+		Entrypoints:            entrypoints,
 		ContractMigrateVersion: nil,
 	}, nil
 }

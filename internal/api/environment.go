@@ -2,7 +2,6 @@ package api
 
 import (
 	"fmt"
-	"reflect"
 
 	"github.com/CosmWasm/wasmvm/v2/types"
 )
@@ -38,16 +37,20 @@ type TransactionInfo struct {
 
 // Validate checks if all required fields are set
 func (e *Environment) Validate() error {
+	if e == nil {
+		return fmt.Errorf("environment cannot be nil")
+	}
 	if e.Code == nil {
 		return fmt.Errorf("code is required")
 	}
 	if e.Store == nil {
 		return fmt.Errorf("store is required")
 	}
-	if reflect.ValueOf(e.API).IsNil() {
-		return fmt.Errorf("api is required")
+	if e.API.HumanizeAddress == nil || e.API.CanonicalizeAddress == nil || e.API.ValidateAddress == nil {
+		return fmt.Errorf("all API functions must be set (HumanizeAddress, CanonicalizeAddress, ValidateAddress)")
 	}
-	if reflect.ValueOf(e.Querier).IsNil() {
+	var nilQuerier *types.Querier
+	if e.Querier == *nilQuerier {
 		return fmt.Errorf("querier is required")
 	}
 	return nil
