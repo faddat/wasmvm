@@ -31,7 +31,16 @@ const (
 func withVM(t *testing.T) *VM {
 	tmpdir, err := os.MkdirTemp("", "wasmvm-testing")
 	require.NoError(t, err)
-	vm, err := NewVM(tmpdir, TESTING_CAPABILITIES, TESTING_MEMORY_LIMIT, TESTING_PRINT_DEBUG, TESTING_CACHE_SIZE)
+	config := types.VMConfig{
+		WasmLimits: types.WasmLimits{},
+		Cache: types.CacheOptions{
+			BaseDir:                  tmpdir,
+			AvailableCapabilities:    TESTING_CAPABILITIES,
+			MemoryCacheSizeBytes:     types.NewSizeKibi(TESTING_CACHE_SIZE * 1024),   // Convert MiB to bytes
+			InstanceMemoryLimitBytes: types.NewSizeKibi(TESTING_MEMORY_LIMIT * 1024), // Convert MiB to bytes
+		},
+	}
+	vm, err := NewVM(config)
 	require.NoError(t, err)
 
 	t.Cleanup(func() {

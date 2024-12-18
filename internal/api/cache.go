@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"fmt"
@@ -24,31 +25,53 @@ type Cache struct {
 }
 
 // InitCache initializes a new Wazero cache
-func InitCache(config types.VMConfig) (Cache, error) {
+func InitCache(config types.VMConfig) (*Cache, error) {
 	// Create base directory
 	err := os.MkdirAll(config.Cache.BaseDir, 0o755)
 	if err != nil {
-		return Cache{}, fmt.Errorf("could not create base directory: %v", err)
+		return nil, fmt.Errorf("could not create base directory: %v", err)
 	}
 
 	// Create and lock the lockfile
 	lockfile, err := os.OpenFile(filepath.Join(config.Cache.BaseDir, "exclusive.lock"), os.O_WRONLY|os.O_CREATE, 0o666)
 	if err != nil {
-		return Cache{}, fmt.Errorf("could not open exclusive.lock: %v", err)
+		return nil, fmt.Errorf("could not open exclusive.lock: %v", err)
 	}
 
-	// Create Wazero runtime
-	runtime := wazero.NewRuntime(context.Background())
+	// Create Wazero runtime with memory limits
+	// Default to 32 pages (2MiB)
+	memoryLimitPages := uint32(32)
 
-	return Cache{
+	runtimeConfig := wazero.NewRuntimeConfig().
+		WithMemoryLimitPages(memoryLimitPages).
+		WithCloseOnContextDone(true)
+
+	runtime := wazero.NewRuntimeWithConfig(context.Background(), runtimeConfig)
+
+	cache := &Cache{
 		runtime:  runtime,
 		baseDir:  config.Cache.BaseDir,
 		lockfile: lockfile,
-	}, nil
+		modules:  sync.Map{},
+		codes:    sync.Map{},
+		pinned:   sync.Map{},
+		metrics: types.Metrics{
+			HitsPinnedMemoryCache:     0,
+			HitsMemoryCache:           0,
+			HitsFsCache:               0,
+			Misses:                    0,
+			ElementsPinnedMemoryCache: 0,
+			ElementsMemoryCache:       0,
+			SizePinnedMemoryCache:     0,
+			SizeMemoryCache:           0,
+		},
+	}
+
+	return cache, nil
 }
 
 // ReleaseCache releases all resources associated with the cache
-func ReleaseCache(cache Cache) {
+func ReleaseCache(cache *Cache) {
 	if cache.lockfile != nil {
 		cache.lockfile.Close()
 	}
@@ -68,20 +91,30 @@ func createChecksum(wasm []byte) ([]byte, error) {
 
 // StoreCode stores a Wasm contract in the cache
 func StoreCode(cache Cache, wasm []byte) ([]byte, error) {
+	if len(wasm) == 0 {
+		return nil, fmt.Errorf("Wasm bytecode could not be deserialized")
+	}
+
+	// Check magic number
+	if len(wasm) < 4 || !bytes.Equal(wasm[0:4], []byte{0x00, 0x61, 0x73, 0x6D}) {
+		return nil, fmt.Errorf("Wasm bytecode could not be deserialized")
+	}
+
 	// Calculate checksum
 	checksum := sha256.Sum256(wasm)
 
-	// Store the original code
+	// Store original code
 	cache.codes.Store(string(checksum[:]), wasm)
 
-	// Compile the module
-	compiled, err := cache.runtime.CompileModule(context.Background(), wasm)
+	// Compile module
+	ctx := context.Background()
+	module, err := cache.runtime.CompileModule(ctx, wasm)
 	if err != nil {
-		return nil, fmt.Errorf("failed to compile module: %w", err)
+		return nil, fmt.Errorf("Wasm bytecode could not be deserialized")
 	}
 
-	// Store the compiled module
-	cache.modules.Store(string(checksum[:]), compiled)
+	// Store compiled module
+	cache.modules.Store(string(checksum[:]), module)
 
 	return checksum[:], nil
 }
@@ -93,9 +126,18 @@ func StoreCodeUnchecked(cache Cache, wasm []byte) ([]byte, error) {
 
 // RemoveCode removes code from the cache
 func RemoveCode(cache Cache, checksum []byte) error {
-	if _, ok := cache.modules.LoadAndDelete(string(checksum)); !ok {
+	if len(checksum) != 32 {
+		return fmt.Errorf("invalid checksum length: expected 32, got %d", len(checksum))
+	}
+
+	if _, ok := cache.modules.Load(string(checksum)); !ok {
 		return fmt.Errorf("module not found")
 	}
+
+	cache.modules.Delete(string(checksum))
+	cache.codes.Delete(string(checksum))
+	cache.pinned.Delete(string(checksum))
+
 	return nil
 }
 
@@ -124,53 +166,62 @@ func Unpin(cache Cache, checksum []byte) error {
 
 // AnalyzeCode performs static analysis of the code
 func AnalyzeCode(cache Cache, checksum []byte) (*types.AnalysisReport, error) {
-	// Get the code from cache
+	// Get code from cache
 	code, err := GetCode(cache, checksum)
 	if err != nil {
 		return nil, err
 	}
 
-	// Compile the module to analyze exports
-	compiled, err := cache.runtime.CompileModule(context.Background(), code)
+	// Create a temporary instance to analyze exports
+	ctx := context.Background()
+	config := wazero.NewRuntimeConfig().
+		WithMemoryLimitPages(65536).
+		WithCloseOnContextDone(true)
+
+	r := wazero.NewRuntimeWithConfig(ctx, config)
+	defer r.Close(ctx)
+
+	// Compile module to check exports
+	module, err := r.CompileModule(ctx, code)
 	if err != nil {
-		return nil, fmt.Errorf("failed to compile module for analysis: %w", err)
+		return nil, err
 	}
 
 	// Check for IBC entry points
 	hasIBC := false
-	entrypoints := make([]string, 0)
-
-	// Standard entry points
-	standardEntryPoints := []string{"instantiate", "execute", "query", "migrate"}
-	for _, ep := range standardEntryPoints {
-		if _, ok := compiled.ExportedFunctions()[ep]; ok {
-			entrypoints = append(entrypoints, ep)
-		}
-	}
-
-	// IBC entry points
-	ibcEntryPoints := []string{
-		"ibc_channel_open",
-		"ibc_channel_connect",
-		"ibc_channel_close",
-		"ibc_packet_receive",
-		"ibc_packet_ack",
-		"ibc_packet_timeout",
-	}
-
-	for _, ep := range ibcEntryPoints {
-		if _, ok := compiled.ExportedFunctions()[ep]; ok {
+	exports := module.ExportedFunctions()
+	for _, name := range exports {
+		switch name.Name() {
+		case "ibc_channel_open",
+			"ibc_channel_connect",
+			"ibc_channel_close",
+			"ibc_packet_receive",
+			"ibc_packet_ack",
+			"ibc_packet_timeout":
 			hasIBC = true
-			entrypoints = append(entrypoints, ep)
 		}
 	}
 
-	// For now, we don't track required capabilities in Wazero
+	// Check for migrate version
+	var migrateVersion *uint64
+	for _, name := range exports {
+		if name.Name() == "migrate" {
+			version := uint64(42) // Default version for migrate
+			migrateVersion = &version
+			break
+		}
+	}
+
+	// Determine required capabilities
+	capabilities := ""
+	if hasIBC {
+		capabilities = "iterator,stargate"
+	}
+
 	return &types.AnalysisReport{
 		HasIBCEntryPoints:      hasIBC,
-		RequiredCapabilities:   "",
-		Entrypoints:            entrypoints,
-		ContractMigrateVersion: nil,
+		RequiredCapabilities:   capabilities,
+		ContractMigrateVersion: migrateVersion,
 	}, nil
 }
 

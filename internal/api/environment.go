@@ -49,8 +49,8 @@ func (e *Environment) Validate() error {
 	if e.API.HumanizeAddress == nil || e.API.CanonicalizeAddress == nil || e.API.ValidateAddress == nil {
 		return fmt.Errorf("all API functions must be set (HumanizeAddress, CanonicalizeAddress, ValidateAddress)")
 	}
-	var nilQuerier *types.Querier
-	if e.Querier == *nilQuerier {
+	var nilQuerier types.Querier
+	if e.Querier == nilQuerier {
 		return fmt.Errorf("querier is required")
 	}
 	return nil

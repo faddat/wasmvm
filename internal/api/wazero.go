@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 
 	"github.com/CosmWasm/wasmvm/v2/types"
@@ -9,58 +10,147 @@ import (
 	wazeroapi "github.com/tetratelabs/wazero/api"
 )
 
-// NewWazeroVM wraps creation of a WazeroInstance. Validate the environment, then
-// compile and instantiate the WASM module from env.Code.
-func NewWazeroVM(env *Environment, gasMeter types.GasMeter, gasLimit uint64) (*WazeroInstance, error) {
-	// Ensure all required fields are valid
-	if err := env.Validate(); err != nil {
-		return nil, err
-	}
-	if len(env.Code) == 0 {
-		return nil, fmt.Errorf("no wasm code found in Environment.Code")
-	}
-
-	instance, err := NewWazeroInstance(env, env.Code, gasLimit)
-	if err != nil {
-		return nil, err
-	}
-	instance.env = env
-	return instance, nil
-}
-
-// WazeroInstance represents a Wazero instance of a WebAssembly module
+// WazeroInstance represents a Wazero instance
 type WazeroInstance struct {
+	ctx    context.Context
 	module wazeroapi.Module
 	env    *Environment
 }
 
-// NewWazeroInstance compiles and instantiates the given WASM code with a memory limit.
-func NewWazeroInstance(env *Environment, code []byte, gasLimit uint64) (*WazeroInstance, error) {
-	ctx := context.Background()
+// WazeroGasMeter implements types.GasMeter
+type WazeroGasMeter struct {
+	consumed types.Gas
+}
 
-	// Example: This runtime config might be updated to reflect memory or compiler settings
+func (g *WazeroGasMeter) GasConsumed() types.Gas {
+	return g.consumed
+}
+
+func (g *WazeroGasMeter) ConsumeGas(amount types.Gas, reason string) {
+	g.consumed += amount
+}
+
+// createModule creates a new Wazero module
+func createModule(ctx context.Context, code []byte, env *Environment, gasMeter *WazeroGasMeter, gasLimit uint64) (wazeroapi.Module, error) {
+	// Create runtime
 	config := wazero.NewRuntimeConfig().
 		WithMemoryLimitPages(65536).
 		WithCloseOnContextDone(true)
 
 	r := wazero.NewRuntimeWithConfig(ctx, config)
-	instance := &WazeroInstance{module: nil, env: env}
 
-	// Build a host module named "env" for the host functions
+	// Build host module
 	builder := r.NewHostModuleBuilder("env")
 
-	// Register host functions (db_read, db_write, etc.). For brevity, we show only db_read:
-	for name, fn := range instance.hostFuncs() {
-		builder.
-			NewFunctionBuilder().
-			WithGoModuleFunction(fn, []wazeroapi.ValueType{
-				wazeroapi.ValueTypeI32, wazeroapi.ValueTypeI32, wazeroapi.ValueTypeI32, wazeroapi.ValueTypeI32,
-			}, []wazeroapi.ValueType{
-				wazeroapi.ValueTypeI64, wazeroapi.ValueTypeI64,
-			}).
-			Export(name)
-	}
+	// Add host functions
+	builder.NewFunctionBuilder().
+		WithFunc(func(ctx context.Context, m wazeroapi.Module, stack []uint64) {
+			// db_read implementation
+			keyPtr := uint32(stack[0])
+			keyLen := uint32(stack[1])
+			valPtr := uint32(stack[2])
 
+			// Read key from memory
+			mem := m.Memory()
+			if mem == nil {
+				stack[0] = 1 // Error
+				return
+			}
+
+			key, ok := mem.Read(keyPtr, keyLen)
+			if !ok {
+				stack[0] = 1 // Error
+				return
+			}
+
+			// Call store.Get
+			value := env.Store.Get(key)
+			if value == nil {
+				stack[0] = 1 // Error
+				return
+			}
+
+			// Write value to memory
+			if !mem.Write(valPtr, value) {
+				stack[0] = 1 // Error
+				return
+			}
+
+			stack[0] = 0 // Success
+		}).
+		WithParameterNames("key_ptr", "key_len", "val_ptr").
+		Export("db_read")
+
+	builder.NewFunctionBuilder().
+		WithFunc(func(ctx context.Context, m wazeroapi.Module, stack []uint64) {
+			// db_write implementation
+			keyPtr := uint32(stack[0])
+			keyLen := uint32(stack[1])
+			valPtr := uint32(stack[2])
+			valLen := uint32(stack[3])
+
+			// Read key and value from memory
+			mem := m.Memory()
+			if mem == nil {
+				stack[0] = 1 // Error
+				return
+			}
+
+			key, ok := mem.Read(keyPtr, keyLen)
+			if !ok {
+				stack[0] = 1 // Error
+				return
+			}
+
+			value, ok := mem.Read(valPtr, valLen)
+			if !ok {
+				stack[0] = 1 // Error
+				return
+			}
+
+			// Call store.Set
+			env.Store.Set(key, value)
+			stack[0] = 0 // Success
+		}).
+		WithParameterNames("key_ptr", "key_len", "val_ptr", "val_len").
+		Export("db_write")
+
+	builder.NewFunctionBuilder().
+		WithFunc(func(ctx context.Context, m wazeroapi.Module, stack []uint64) {
+			// db_remove implementation
+			keyPtr := uint32(stack[0])
+			keyLen := uint32(stack[1])
+
+			// Read key from memory
+			mem := m.Memory()
+			if mem == nil {
+				stack[0] = 1 // Error
+				return
+			}
+
+			key, ok := mem.Read(keyPtr, keyLen)
+			if !ok {
+				stack[0] = 1 // Error
+				return
+			}
+
+			// Call store.Delete
+			env.Store.Delete(key)
+			stack[0] = 0 // Success
+		}).
+		WithParameterNames("key_ptr", "key_len").
+		Export("db_remove")
+
+	builder.NewFunctionBuilder().
+		WithFunc(func(ctx context.Context, m wazeroapi.Module, stack []uint64) {
+			// gas_consume implementation
+			amount := uint64(stack[0])
+			gasMeter.ConsumeGas(amount, "wasm gas")
+		}).
+		WithParameterNames("amount").
+		Export("gas_consume")
+
+	// Create host module
 	if _, err := builder.Instantiate(ctx); err != nil {
 		return nil, fmt.Errorf("failed to create host module: %w", err)
 	}
@@ -71,280 +161,294 @@ func NewWazeroInstance(env *Environment, code []byte, gasLimit uint64) (*WazeroI
 		return nil, fmt.Errorf("failed to compile module: %w", err)
 	}
 
-	// Instantiate the module with default module config
-	mod, err := r.InstantiateModule(ctx, compiled, wazero.NewModuleConfig().WithName("env"))
+	// Instantiate module
+	module, err := r.InstantiateModule(ctx, compiled, wazero.NewModuleConfig().WithName("env"))
 	if err != nil {
 		return nil, fmt.Errorf("failed to instantiate module: %w", err)
 	}
 
-	instance.module = mod
-	return instance, nil
+	return module, nil
 }
 
-// Close releases the underlying module. This should be deferred.
+// NewWazeroInstance creates a new WazeroInstance
+func NewWazeroInstance(env *Environment, code []byte, gasMeter *WazeroGasMeter, gasLimit uint64) (*WazeroInstance, error) {
+	// Initialize context
+	ctx := context.Background()
+
+	// Create module
+	module, err := createModule(ctx, code, env, gasMeter, gasLimit)
+	if err != nil {
+		return nil, err
+	}
+
+	return &WazeroInstance{
+		ctx:    ctx,
+		module: module,
+		env:    env,
+	}, nil
+}
+
+// Close releases resources associated with the instance
 func (i *WazeroInstance) Close() error {
-	if i.module == nil {
-		return nil
+	if i.module != nil {
+		return i.module.Close(i.ctx)
 	}
-	return i.module.Close(context.Background())
+	return nil
 }
 
-// Memory returns the default memory exported by the module (if any)
-func (i *WazeroInstance) Memory() wazeroapi.Memory {
-	if i.module == nil {
-		return nil
-	}
-	return i.module.Memory()
-}
-
-// hostFuncs creates a set of host function mappings
-func (i *WazeroInstance) hostFuncs() map[string]wazeroapi.GoModuleFunction {
-	return map[string]wazeroapi.GoModuleFunction{
-		"db_read": wazeroapi.GoModuleFunc(func(ctx context.Context, mod wazeroapi.Module, stack []uint64) {
-			i.db_read(ctx, mod, stack)
-		}),
-		// db_write, db_remove, gasConsume, etc. could be added similarly
-	}
-}
-
-// Example host function. Adjust logic and param usage as needed.
-func (i *WazeroInstance) db_read(ctx context.Context, mod wazeroapi.Module, stack []uint64) {
-	// Typically, decode offset and length from stack
-	keyPtr := DecodeU32(stack[0])
-	keyLen := DecodeU32(stack[1])
-
-	// Perform read logic, handle errors, etc.
-	if i.env == nil || i.env.Store == nil {
-		stack[0] = EncodeI32(-1)
-		return
+// allocateAndWrite allocates memory and writes data to it
+func (i *WazeroInstance) allocateAndWrite(data []byte) (uint64, error) {
+	// Allocate memory
+	size := uint32(len(data))
+	ptr, err := i.module.ExportedFunction("allocate").Call(i.ctx, uint64(size))
+	if err != nil {
+		return 0, err
 	}
 
-	// Example usage of i.Memory() to read the key
-	keyBytes, ok := i.Memory().Read(keyPtr, keyLen)
-	if !ok {
-		stack[0] = EncodeI32(-1)
-		return
-	}
-
-	valueBytes := i.env.Store.Get(keyBytes)
-	if valueBytes == nil {
-		stack[0] = EncodeI32(-1)
-		return
-	}
-
-	// If read success, push success code
-	stack[0] = EncodeI32(0)
-}
-
-// allocate extends the memory if needed, returning the start offset
-func (i *WazeroInstance) allocate(size uint64) (uint64, error) {
-	mem := i.Memory()
+	// Write data to memory
+	mem := i.module.Memory()
 	if mem == nil {
 		return 0, fmt.Errorf("no memory exported")
 	}
-	currentPages := uint64(mem.Size() / 65536)
-	requiredPages := (size + 65535) / 65536
-	if requiredPages > currentPages {
-		_, ok := mem.Grow(uint32(requiredPages - currentPages))
-		if !ok {
-			return 0, fmt.Errorf("failed to grow memory to accommodate %d bytes", size)
-		}
+
+	if !mem.Write(uint32(ptr[0]), data) {
+		return 0, fmt.Errorf("failed to write to memory")
 	}
-	// Return the offset as currentPages * 65536
-	return currentPages * 65536, nil
+
+	return ptr[0], nil
 }
 
-// deallocate is a no-op, but can be extended to do free-lists or other logic
-func (i *WazeroInstance) deallocate(_ uint64) error {
-	return nil
-}
-
-// ReadMemory reads bytes from WASM memory
-func (i *WazeroInstance) ReadMemory(offset uint32, size uint32) ([]byte, error) {
-	mem := i.Memory()
+// readResult reads a result from memory
+func (i *WazeroInstance) readResult(ptr uint64) ([]byte, error) {
+	mem := i.module.Memory()
 	if mem == nil {
 		return nil, fmt.Errorf("no memory exported")
 	}
-	data, ok := mem.Read(offset, size)
+
+	// Read length
+	lenPtr := ptr + 4
+	lenBytes, ok := mem.Read(uint32(lenPtr), 4)
 	if !ok {
-		return nil, fmt.Errorf("failed to read memory at offset %d with size %d", offset, size)
+		return nil, fmt.Errorf("failed to read result length")
 	}
+	length := binary.LittleEndian.Uint32(lenBytes)
+
+	// Read data
+	dataPtr := ptr + 8
+	data, ok := mem.Read(uint32(dataPtr), length)
+	if !ok {
+		return nil, fmt.Errorf("failed to read result data")
+	}
+
 	return data, nil
 }
 
-// WriteMemory writes bytes to WASM memory
-func (i *WazeroInstance) WriteMemory(offset uint32, data []byte) error {
-	mem := i.Memory()
-	if mem == nil {
-		return fmt.Errorf("no memory exported")
+// callFunction calls a Wasm function
+func (i *WazeroInstance) callFunction(name string, args ...uint64) (uint64, error) {
+	fn := i.module.ExportedFunction(name)
+	if fn == nil {
+		return 0, fmt.Errorf("function %s not found", name)
 	}
-	if !mem.Write(offset, data) {
-		return fmt.Errorf("failed to write memory at offset %d with size %d", offset, len(data))
+
+	result, err := fn.Call(i.ctx, args...)
+	if err != nil {
+		return 0, err
 	}
-	return nil
+
+	return result[0], nil
 }
 
-// AllocateMemory allocates memory for size bytes
-func (i *WazeroInstance) AllocateMemory(size uint64) (uint64, error) {
-	return i.allocate(size)
+// AnalyzeCode analyzes the code for capabilities
+func (i *WazeroInstance) AnalyzeCode() (*types.AnalysisReport, error) {
+	report := &types.AnalysisReport{
+		HasIBCEntryPoints: false,
+	}
+
+	// Check for IBC entry points
+	ibcFunctions := []string{
+		"ibc_channel_open",
+		"ibc_channel_connect",
+		"ibc_channel_close",
+		"ibc_packet_receive",
+		"ibc_packet_ack",
+		"ibc_packet_timeout",
+	}
+
+	hasAllIBCFunctions := true
+	for _, name := range ibcFunctions {
+		if i.module.ExportedFunction(name) == nil {
+			hasAllIBCFunctions = false
+			break
+		}
+	}
+
+	report.HasIBCEntryPoints = hasAllIBCFunctions
+	return report, nil
 }
 
-// DeallocateMemory frees allocated memory (no-op here)
-func (i *WazeroInstance) DeallocateMemory(ptr uint64) error {
-	return i.deallocate(ptr)
-}
-
-// EncodeI32 encodes an int32 for WebAssembly
-func EncodeI32(x int32) uint64 {
-	return uint64(uint32(x))
-}
-
-// DecodeU32 decodes a uint32 from WebAssembly
-func DecodeU32(x uint64) uint32 {
-	return uint32(x)
-}
-
-// EncodeI64 encodes an int64 for WebAssembly
-func EncodeI64(x int64) uint64 {
-	return uint64(x)
-}
-
-// DecodeI64 decodes an int64 from WebAssembly
-func DecodeI64(x uint64) int64 {
-	return int64(x)
-}
-
-// Instantiate calls the instantiate function in the Wasm module
-func (i *WazeroInstance) Instantiate(env []byte, info []byte, msg []byte,
-	gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI,
-	querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
-
-	// Write environment data to memory
-	envPtr, err := i.AllocateMemory(uint64(len(env)))
+// IBCPacketTimeout handles an IBC packet timeout
+func (i *WazeroInstance) IBCPacketTimeout(code []byte, msg []byte, gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI, querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
+	// Write message to memory
+	msgPtr, err := i.allocateAndWrite(msg)
 	if err != nil {
 		return nil, types.GasReport{}, err
 	}
-	if err := i.WriteMemory(uint32(envPtr), env); err != nil {
-		return nil, types.GasReport{}, err
-	}
 
-	// Write info data to memory
-	infoPtr, err := i.AllocateMemory(uint64(len(info)))
-	if err != nil {
-		return nil, types.GasReport{}, err
-	}
-	if err := i.WriteMemory(uint32(infoPtr), info); err != nil {
-		return nil, types.GasReport{}, err
-	}
-
-	// Write message data to memory
-	msgPtr, err := i.AllocateMemory(uint64(len(msg)))
-	if err != nil {
-		return nil, types.GasReport{}, err
-	}
-	if err := i.WriteMemory(uint32(msgPtr), msg); err != nil {
-		return nil, types.GasReport{}, err
-	}
-
-	// Call instantiate function
-	results, err := i.module.ExportedFunction("instantiate").Call(context.Background(), envPtr, infoPtr, msgPtr)
+	// Call the Wasm function
+	result, err := i.callFunction("ibc_packet_timeout", msgPtr)
 	if err != nil {
 		return nil, types.GasReport{}, err
 	}
 
 	// Read result from memory
-	resultPtr := DecodeU32(results[0])
-	resultLen := DecodeU32(results[1])
-	result, err := i.ReadMemory(resultPtr, resultLen)
+	data, err := i.readResult(result)
 	if err != nil {
 		return nil, types.GasReport{}, err
 	}
 
-	return result, types.GasReport{}, nil
+	return data, types.GasReport{}, nil
 }
 
-// Execute calls the execute function in the Wasm module
-func (i *WazeroInstance) Execute(env []byte, info []byte, msg []byte,
-	gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI,
-	querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
-
-	// Write environment data to memory
-	envPtr, err := i.AllocateMemory(uint64(len(env)))
+// IBCChannelOpen handles IBC channel open
+func (i *WazeroInstance) IBCChannelOpen(code []byte, msg []byte, gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI, querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
+	msgPtr, err := i.allocateAndWrite(msg)
 	if err != nil {
 		return nil, types.GasReport{}, err
 	}
-	if err := i.WriteMemory(uint32(envPtr), env); err != nil {
-		return nil, types.GasReport{}, err
-	}
-
-	// Write info data to memory
-	infoPtr, err := i.AllocateMemory(uint64(len(info)))
+	result, err := i.callFunction("ibc_channel_open", msgPtr)
 	if err != nil {
 		return nil, types.GasReport{}, err
 	}
-	if err := i.WriteMemory(uint32(infoPtr), info); err != nil {
-		return nil, types.GasReport{}, err
-	}
-
-	// Write message data to memory
-	msgPtr, err := i.AllocateMemory(uint64(len(msg)))
+	data, err := i.readResult(result)
 	if err != nil {
 		return nil, types.GasReport{}, err
 	}
-	if err := i.WriteMemory(uint32(msgPtr), msg); err != nil {
+	return data, types.GasReport{}, nil
+}
+
+// IBCChannelConnect handles IBC channel connect
+func (i *WazeroInstance) IBCChannelConnect(code []byte, msg []byte, gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI, querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
+	msgPtr, err := i.allocateAndWrite(msg)
+	if err != nil {
+		return nil, types.GasReport{}, err
+	}
+	result, err := i.callFunction("ibc_channel_connect", msgPtr)
+	if err != nil {
+		return nil, types.GasReport{}, err
+	}
+	data, err := i.readResult(result)
+	if err != nil {
+		return nil, types.GasReport{}, err
+	}
+	return data, types.GasReport{}, nil
+}
+
+// IBCChannelClose handles IBC channel close
+func (i *WazeroInstance) IBCChannelClose(code []byte, msg []byte, gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI, querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
+	msgPtr, err := i.allocateAndWrite(msg)
+	if err != nil {
+		return nil, types.GasReport{}, err
+	}
+	result, err := i.callFunction("ibc_channel_close", msgPtr)
+	if err != nil {
+		return nil, types.GasReport{}, err
+	}
+	data, err := i.readResult(result)
+	if err != nil {
+		return nil, types.GasReport{}, err
+	}
+	return data, types.GasReport{}, nil
+}
+
+// IBCPacketReceive handles IBC packet receive
+func (i *WazeroInstance) IBCPacketReceive(code []byte, msg []byte, gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI, querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
+	msgPtr, err := i.allocateAndWrite(msg)
+	if err != nil {
+		return nil, types.GasReport{}, err
+	}
+	result, err := i.callFunction("ibc_packet_receive", msgPtr)
+	if err != nil {
+		return nil, types.GasReport{}, err
+	}
+	data, err := i.readResult(result)
+	if err != nil {
+		return nil, types.GasReport{}, err
+	}
+	return data, types.GasReport{}, nil
+}
+
+// IBCPacketAck handles IBC packet ack
+func (i *WazeroInstance) IBCPacketAck(code []byte, msg []byte, gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI, querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
+	msgPtr, err := i.allocateAndWrite(msg)
+	if err != nil {
+		return nil, types.GasReport{}, err
+	}
+	result, err := i.callFunction("ibc_packet_ack", msgPtr)
+	if err != nil {
+		return nil, types.GasReport{}, err
+	}
+	data, err := i.readResult(result)
+	if err != nil {
+		return nil, types.GasReport{}, err
+	}
+	return data, types.GasReport{}, nil
+}
+
+// IBCSourceCallback handles IBC source callback
+func (i *WazeroInstance) IBCSourceCallback(code []byte, msg []byte, gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI, querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
+	msgPtr, err := i.allocateAndWrite(msg)
+	if err != nil {
+		return nil, types.GasReport{}, err
+	}
+	result, err := i.callFunction("ibc_source_callback", msgPtr)
+	if err != nil {
+		return nil, types.GasReport{}, err
+	}
+	data, err := i.readResult(result)
+	if err != nil {
+		return nil, types.GasReport{}, err
+	}
+	return data, types.GasReport{}, nil
+}
+
+// IBCDestinationCallback handles IBC destination callback
+func (i *WazeroInstance) IBCDestinationCallback(code []byte, msg []byte, gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI, querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
+	msgPtr, err := i.allocateAndWrite(msg)
+	if err != nil {
+		return nil, types.GasReport{}, err
+	}
+	result, err := i.callFunction("ibc_destination_callback", msgPtr)
+	if err != nil {
+		return nil, types.GasReport{}, err
+	}
+	data, err := i.readResult(result)
+	if err != nil {
+		return nil, types.GasReport{}, err
+	}
+	return data, types.GasReport{}, nil
+}
+
+// Execute executes a contract with the given parameters
+func (i *WazeroInstance) Execute(code []byte, info []byte, msg []byte, gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI, querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
+	// Write parameters to memory
+	infoPtr, err := i.allocateAndWrite(info)
+	if err != nil {
+		return nil, types.GasReport{}, err
+	}
+
+	msgPtr, err := i.allocateAndWrite(msg)
+	if err != nil {
 		return nil, types.GasReport{}, err
 	}
 
 	// Call execute function
-	results, err := i.module.ExportedFunction("execute").Call(context.Background(), envPtr, infoPtr, msgPtr)
+	resultPtr, err := i.callFunction("execute", infoPtr, msgPtr)
 	if err != nil {
 		return nil, types.GasReport{}, err
 	}
 
-	// Read result from memory
-	resultPtr := DecodeU32(results[0])
-	resultLen := DecodeU32(results[1])
-	result, err := i.ReadMemory(resultPtr, resultLen)
-	if err != nil {
-		return nil, types.GasReport{}, err
-	}
-
-	return result, types.GasReport{}, nil
-}
-
-// Query calls the query function in the Wasm module
-func (i *WazeroInstance) Query(env []byte, msg []byte,
-	gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI,
-	querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
-
-	// Write environment data to memory
-	envPtr, err := i.AllocateMemory(uint64(len(env)))
-	if err != nil {
-		return nil, types.GasReport{}, err
-	}
-	if err := i.WriteMemory(uint32(envPtr), env); err != nil {
-		return nil, types.GasReport{}, err
-	}
-
-	// Write message data to memory
-	msgPtr, err := i.AllocateMemory(uint64(len(msg)))
-	if err != nil {
-		return nil, types.GasReport{}, err
-	}
-	if err := i.WriteMemory(uint32(msgPtr), msg); err != nil {
-		return nil, types.GasReport{}, err
-	}
-
-	// Call query function
-	results, err := i.module.ExportedFunction("query").Call(context.Background(), envPtr, msgPtr)
-	if err != nil {
-		return nil, types.GasReport{}, err
-	}
-
-	// Read result from memory
-	resultPtr := DecodeU32(results[0])
-	resultLen := DecodeU32(results[1])
-	result, err := i.ReadMemory(resultPtr, resultLen)
+	// Read result
+	result, err := i.readResult(resultPtr)
 	if err != nil {
 		return nil, types.GasReport{}, err
 	}
@@ -352,39 +456,27 @@ func (i *WazeroInstance) Query(env []byte, msg []byte,
 	return result, types.GasReport{}, nil
 }
 
-// Migrate calls the migrate function in the Wasm module
-func (i *WazeroInstance) Migrate(env []byte, msg []byte,
-	gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI,
-	querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
-
-	// Write environment data to memory
-	envPtr, err := i.AllocateMemory(uint64(len(env)))
-	if err != nil {
-		return nil, types.GasReport{}, err
-	}
-	if err := i.WriteMemory(uint32(envPtr), env); err != nil {
-		return nil, types.GasReport{}, err
-	}
-
-	// Write message data to memory
-	msgPtr, err := i.AllocateMemory(uint64(len(msg)))
-	if err != nil {
-		return nil, types.GasReport{}, err
-	}
-	if err := i.WriteMemory(uint32(msgPtr), msg); err != nil {
-		return nil, types.GasReport{}, err
-	}
-
-	// Call migrate function
-	results, err := i.module.ExportedFunction("migrate").Call(context.Background(), envPtr, msgPtr)
+// Instantiate creates a new instance of a contract
+func (i *WazeroInstance) Instantiate(code []byte, info []byte, msg []byte, gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI, querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
+	// Write parameters to memory
+	infoPtr, err := i.allocateAndWrite(info)
 	if err != nil {
 		return nil, types.GasReport{}, err
 	}
 
-	// Read result from memory
-	resultPtr := DecodeU32(results[0])
-	resultLen := DecodeU32(results[1])
-	result, err := i.ReadMemory(resultPtr, resultLen)
+	msgPtr, err := i.allocateAndWrite(msg)
+	if err != nil {
+		return nil, types.GasReport{}, err
+	}
+
+	// Call instantiate function
+	resultPtr, err := i.callFunction("instantiate", infoPtr, msgPtr)
+	if err != nil {
+		return nil, types.GasReport{}, err
+	}
+
+	// Read result
+	result, err := i.readResult(resultPtr)
 	if err != nil {
 		return nil, types.GasReport{}, err
 	}
@@ -392,39 +484,19 @@ func (i *WazeroInstance) Migrate(env []byte, msg []byte,
 	return result, types.GasReport{}, nil
 }
 
-// IBCChannelOpen calls the ibc_channel_open function in the Wasm module
-func (i *WazeroInstance) IBCChannelOpen(env []byte, msg []byte,
-	gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI,
-	querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
-
-	// Write environment data to memory
-	envPtr, err := i.AllocateMemory(uint64(len(env)))
-	if err != nil {
-		return nil, types.GasReport{}, err
-	}
-	if err := i.WriteMemory(uint32(envPtr), env); err != nil {
-		return nil, types.GasReport{}, err
-	}
-
-	// Write message data to memory
-	msgPtr, err := i.AllocateMemory(uint64(len(msg)))
-	if err != nil {
-		return nil, types.GasReport{}, err
-	}
-	if err := i.WriteMemory(uint32(msgPtr), msg); err != nil {
-		return nil, types.GasReport{}, err
-	}
-
-	// Call ibc_channel_open function
-	results, err := i.module.ExportedFunction("ibc_channel_open").Call(context.Background(), envPtr, msgPtr)
+// Query executes a query on a contract
+func (i *WazeroInstance) Query(code []byte, msg []byte, gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI, querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
+	msgPtr, err := i.allocateAndWrite(msg)
 	if err != nil {
 		return nil, types.GasReport{}, err
 	}
 
-	// Read result from memory
-	resultPtr := DecodeU32(results[0])
-	resultLen := DecodeU32(results[1])
-	result, err := i.ReadMemory(resultPtr, resultLen)
+	resultPtr, err := i.callFunction("query", msgPtr)
+	if err != nil {
+		return nil, types.GasReport{}, err
+	}
+
+	result, err := i.readResult(resultPtr)
 	if err != nil {
 		return nil, types.GasReport{}, err
 	}
@@ -432,39 +504,19 @@ func (i *WazeroInstance) IBCChannelOpen(env []byte, msg []byte,
 	return result, types.GasReport{}, nil
 }
 
-// IBCChannelConnect calls the ibc_channel_connect function in the Wasm module
-func (i *WazeroInstance) IBCChannelConnect(env []byte, msg []byte,
-	gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI,
-	querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
-
-	// Write environment data to memory
-	envPtr, err := i.AllocateMemory(uint64(len(env)))
-	if err != nil {
-		return nil, types.GasReport{}, err
-	}
-	if err := i.WriteMemory(uint32(envPtr), env); err != nil {
-		return nil, types.GasReport{}, err
-	}
-
-	// Write message data to memory
-	msgPtr, err := i.AllocateMemory(uint64(len(msg)))
-	if err != nil {
-		return nil, types.GasReport{}, err
-	}
-	if err := i.WriteMemory(uint32(msgPtr), msg); err != nil {
-		return nil, types.GasReport{}, err
-	}
-
-	// Call ibc_channel_connect function
-	results, err := i.module.ExportedFunction("ibc_channel_connect").Call(context.Background(), envPtr, msgPtr)
+// Migrate executes a migration on a contract
+func (i *WazeroInstance) Migrate(code []byte, msg []byte, gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI, querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
+	msgPtr, err := i.allocateAndWrite(msg)
 	if err != nil {
 		return nil, types.GasReport{}, err
 	}
 
-	// Read result from memory
-	resultPtr := DecodeU32(results[0])
-	resultLen := DecodeU32(results[1])
-	result, err := i.ReadMemory(resultPtr, resultLen)
+	resultPtr, err := i.callFunction("migrate", msgPtr)
+	if err != nil {
+		return nil, types.GasReport{}, err
+	}
+
+	result, err := i.readResult(resultPtr)
 	if err != nil {
 		return nil, types.GasReport{}, err
 	}
@@ -472,39 +524,24 @@ func (i *WazeroInstance) IBCChannelConnect(env []byte, msg []byte,
 	return result, types.GasReport{}, nil
 }
 
-// IBCChannelClose calls the ibc_channel_close function in the Wasm module
-func (i *WazeroInstance) IBCChannelClose(env []byte, msg []byte,
-	gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI,
-	querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
-
-	// Write environment data to memory
-	envPtr, err := i.AllocateMemory(uint64(len(env)))
-	if err != nil {
-		return nil, types.GasReport{}, err
-	}
-	if err := i.WriteMemory(uint32(envPtr), env); err != nil {
-		return nil, types.GasReport{}, err
-	}
-
-	// Write message data to memory
-	msgPtr, err := i.AllocateMemory(uint64(len(msg)))
-	if err != nil {
-		return nil, types.GasReport{}, err
-	}
-	if err := i.WriteMemory(uint32(msgPtr), msg); err != nil {
-		return nil, types.GasReport{}, err
-	}
-
-	// Call ibc_channel_close function
-	results, err := i.module.ExportedFunction("ibc_channel_close").Call(context.Background(), envPtr, msgPtr)
+// MigrateWithInfo executes a migration with additional info
+func (i *WazeroInstance) MigrateWithInfo(code []byte, msg []byte, migrateInfo []byte, gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI, querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
+	msgPtr, err := i.allocateAndWrite(msg)
 	if err != nil {
 		return nil, types.GasReport{}, err
 	}
 
-	// Read result from memory
-	resultPtr := DecodeU32(results[0])
-	resultLen := DecodeU32(results[1])
-	result, err := i.ReadMemory(resultPtr, resultLen)
+	infoPtr, err := i.allocateAndWrite(migrateInfo)
+	if err != nil {
+		return nil, types.GasReport{}, err
+	}
+
+	resultPtr, err := i.callFunction("migrate_with_info", msgPtr, infoPtr)
+	if err != nil {
+		return nil, types.GasReport{}, err
+	}
+
+	result, err := i.readResult(resultPtr)
 	if err != nil {
 		return nil, types.GasReport{}, err
 	}
@@ -512,39 +549,19 @@ func (i *WazeroInstance) IBCChannelClose(env []byte, msg []byte,
 	return result, types.GasReport{}, nil
 }
 
-// IBCPacketReceive calls the ibc_packet_receive function in the Wasm module
-func (i *WazeroInstance) IBCPacketReceive(env []byte, msg []byte,
-	gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI,
-	querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
-
-	// Write environment data to memory
-	envPtr, err := i.AllocateMemory(uint64(len(env)))
-	if err != nil {
-		return nil, types.GasReport{}, err
-	}
-	if err := i.WriteMemory(uint32(envPtr), env); err != nil {
-		return nil, types.GasReport{}, err
-	}
-
-	// Write message data to memory
-	msgPtr, err := i.AllocateMemory(uint64(len(msg)))
-	if err != nil {
-		return nil, types.GasReport{}, err
-	}
-	if err := i.WriteMemory(uint32(msgPtr), msg); err != nil {
-		return nil, types.GasReport{}, err
-	}
-
-	// Call ibc_packet_receive function
-	results, err := i.module.ExportedFunction("ibc_packet_receive").Call(context.Background(), envPtr, msgPtr)
+// Sudo executes a privileged operation
+func (i *WazeroInstance) Sudo(code []byte, msg []byte, gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI, querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
+	msgPtr, err := i.allocateAndWrite(msg)
 	if err != nil {
 		return nil, types.GasReport{}, err
 	}
 
-	// Read result from memory
-	resultPtr := DecodeU32(results[0])
-	resultLen := DecodeU32(results[1])
-	result, err := i.ReadMemory(resultPtr, resultLen)
+	resultPtr, err := i.callFunction("sudo", msgPtr)
+	if err != nil {
+		return nil, types.GasReport{}, err
+	}
+
+	result, err := i.readResult(resultPtr)
 	if err != nil {
 		return nil, types.GasReport{}, err
 	}
@@ -552,288 +569,19 @@ func (i *WazeroInstance) IBCPacketReceive(env []byte, msg []byte,
 	return result, types.GasReport{}, nil
 }
 
-// IBCPacketAck calls the ibc_packet_ack function in the Wasm module
-func (i *WazeroInstance) IBCPacketAck(env []byte, msg []byte,
-	gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI,
-	querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
-
-	// Write environment data to memory
-	envPtr, err := i.AllocateMemory(uint64(len(env)))
-	if err != nil {
-		return nil, types.GasReport{}, err
-	}
-	if err := i.WriteMemory(uint32(envPtr), env); err != nil {
-		return nil, types.GasReport{}, err
-	}
-
-	// Write message data to memory
-	msgPtr, err := i.AllocateMemory(uint64(len(msg)))
-	if err != nil {
-		return nil, types.GasReport{}, err
-	}
-	if err := i.WriteMemory(uint32(msgPtr), msg); err != nil {
-		return nil, types.GasReport{}, err
-	}
-
-	// Call ibc_packet_ack function
-	results, err := i.module.ExportedFunction("ibc_packet_ack").Call(context.Background(), envPtr, msgPtr)
+// Reply handles a reply callback
+func (i *WazeroInstance) Reply(code []byte, msg []byte, gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI, querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
+	msgPtr, err := i.allocateAndWrite(msg)
 	if err != nil {
 		return nil, types.GasReport{}, err
 	}
 
-	// Read result from memory
-	resultPtr := DecodeU32(results[0])
-	resultLen := DecodeU32(results[1])
-	result, err := i.ReadMemory(resultPtr, resultLen)
+	resultPtr, err := i.callFunction("reply", msgPtr)
 	if err != nil {
 		return nil, types.GasReport{}, err
 	}
 
-	return result, types.GasReport{}, nil
-}
-
-// IBCPacketTimeout calls the ibc_packet_timeout function in the Wasm module
-func (i *WazeroInstance) IBCPacketTimeout(env []byte, msg []byte,
-	gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI,
-	querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
-
-	// Write environment data to memory
-	envPtr, err := i.AllocateMemory(uint64(len(env)))
-	if err != nil {
-		return nil, types.GasReport{}, err
-	}
-	if err := i.WriteMemory(uint32(envPtr), env); err != nil {
-		return nil, types.GasReport{}, err
-	}
-
-	// Write message data to memory
-	msgPtr, err := i.AllocateMemory(uint64(len(msg)))
-	if err != nil {
-		return nil, types.GasReport{}, err
-	}
-	if err := i.WriteMemory(uint32(msgPtr), msg); err != nil {
-		return nil, types.GasReport{}, err
-	}
-
-	// Call ibc_packet_timeout function
-	results, err := i.module.ExportedFunction("ibc_packet_timeout").Call(context.Background(), envPtr, msgPtr)
-	if err != nil {
-		return nil, types.GasReport{}, err
-	}
-
-	// Read result from memory
-	resultPtr := DecodeU32(results[0])
-	resultLen := DecodeU32(results[1])
-	result, err := i.ReadMemory(resultPtr, resultLen)
-	if err != nil {
-		return nil, types.GasReport{}, err
-	}
-
-	return result, types.GasReport{}, nil
-}
-
-// MigrateWithInfo calls the migrate_with_info function in the Wasm module
-func (i *WazeroInstance) MigrateWithInfo(checksum []byte, env []byte, msg []byte, migrateInfo []byte,
-	gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI,
-	querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
-
-	// Write environment data to memory
-	envPtr, err := i.AllocateMemory(uint64(len(env)))
-	if err != nil {
-		return nil, types.GasReport{}, err
-	}
-	if err := i.WriteMemory(uint32(envPtr), env); err != nil {
-		return nil, types.GasReport{}, err
-	}
-
-	// Write message data to memory
-	msgPtr, err := i.AllocateMemory(uint64(len(msg)))
-	if err != nil {
-		return nil, types.GasReport{}, err
-	}
-	if err := i.WriteMemory(uint32(msgPtr), msg); err != nil {
-		return nil, types.GasReport{}, err
-	}
-
-	// Write migrate info to memory
-	infoPtr, err := i.AllocateMemory(uint64(len(migrateInfo)))
-	if err != nil {
-		return nil, types.GasReport{}, err
-	}
-	if err := i.WriteMemory(uint32(infoPtr), migrateInfo); err != nil {
-		return nil, types.GasReport{}, err
-	}
-
-	// Call migrate_with_info function
-	results, err := i.module.ExportedFunction("migrate_with_info").Call(context.Background(), envPtr, msgPtr, infoPtr)
-	if err != nil {
-		return nil, types.GasReport{}, err
-	}
-
-	// Read result from memory
-	resultPtr := DecodeU32(results[0])
-	resultLen := DecodeU32(results[1])
-	result, err := i.ReadMemory(resultPtr, resultLen)
-	if err != nil {
-		return nil, types.GasReport{}, err
-	}
-
-	return result, types.GasReport{}, nil
-}
-
-// Sudo calls the sudo function in the Wasm module
-func (i *WazeroInstance) Sudo(env []byte, msg []byte,
-	gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI,
-	querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
-
-	// Write environment data to memory
-	envPtr, err := i.AllocateMemory(uint64(len(env)))
-	if err != nil {
-		return nil, types.GasReport{}, err
-	}
-	if err := i.WriteMemory(uint32(envPtr), env); err != nil {
-		return nil, types.GasReport{}, err
-	}
-
-	// Write message data to memory
-	msgPtr, err := i.AllocateMemory(uint64(len(msg)))
-	if err != nil {
-		return nil, types.GasReport{}, err
-	}
-	if err := i.WriteMemory(uint32(msgPtr), msg); err != nil {
-		return nil, types.GasReport{}, err
-	}
-
-	// Call sudo function
-	results, err := i.module.ExportedFunction("sudo").Call(context.Background(), envPtr, msgPtr)
-	if err != nil {
-		return nil, types.GasReport{}, err
-	}
-
-	// Read result from memory
-	resultPtr := DecodeU32(results[0])
-	resultLen := DecodeU32(results[1])
-	result, err := i.ReadMemory(resultPtr, resultLen)
-	if err != nil {
-		return nil, types.GasReport{}, err
-	}
-
-	return result, types.GasReport{}, nil
-}
-
-// Reply calls the reply function in the Wasm module
-func (i *WazeroInstance) Reply(env []byte, reply []byte,
-	gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI,
-	querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
-
-	// Write environment data to memory
-	envPtr, err := i.AllocateMemory(uint64(len(env)))
-	if err != nil {
-		return nil, types.GasReport{}, err
-	}
-	if err := i.WriteMemory(uint32(envPtr), env); err != nil {
-		return nil, types.GasReport{}, err
-	}
-
-	// Write reply data to memory
-	replyPtr, err := i.AllocateMemory(uint64(len(reply)))
-	if err != nil {
-		return nil, types.GasReport{}, err
-	}
-	if err := i.WriteMemory(uint32(replyPtr), reply); err != nil {
-		return nil, types.GasReport{}, err
-	}
-
-	// Call reply function
-	results, err := i.module.ExportedFunction("reply").Call(context.Background(), envPtr, replyPtr)
-	if err != nil {
-		return nil, types.GasReport{}, err
-	}
-
-	// Read result from memory
-	resultPtr := DecodeU32(results[0])
-	resultLen := DecodeU32(results[1])
-	result, err := i.ReadMemory(resultPtr, resultLen)
-	if err != nil {
-		return nil, types.GasReport{}, err
-	}
-
-	return result, types.GasReport{}, nil
-}
-
-// IBCSourceCallback calls the ibc_source_callback function in the Wasm module
-func (i *WazeroInstance) IBCSourceCallback(env []byte, msg []byte,
-	gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI,
-	querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
-
-	// Write environment data to memory
-	envPtr, err := i.AllocateMemory(uint64(len(env)))
-	if err != nil {
-		return nil, types.GasReport{}, err
-	}
-	if err := i.WriteMemory(uint32(envPtr), env); err != nil {
-		return nil, types.GasReport{}, err
-	}
-
-	// Write message data to memory
-	msgPtr, err := i.AllocateMemory(uint64(len(msg)))
-	if err != nil {
-		return nil, types.GasReport{}, err
-	}
-	if err := i.WriteMemory(uint32(msgPtr), msg); err != nil {
-		return nil, types.GasReport{}, err
-	}
-
-	// Call ibc_source_callback function
-	results, err := i.module.ExportedFunction("ibc_source_callback").Call(context.Background(), envPtr, msgPtr)
-	if err != nil {
-		return nil, types.GasReport{}, err
-	}
-
-	// Read result from memory
-	resultPtr := DecodeU32(results[0])
-	resultLen := DecodeU32(results[1])
-	result, err := i.ReadMemory(resultPtr, resultLen)
-	if err != nil {
-		return nil, types.GasReport{}, err
-	}
-
-	return result, types.GasReport{}, nil
-}
-
-// IBCDestinationCallback calls the ibc_destination_callback function in the Wasm module
-func (i *WazeroInstance) IBCDestinationCallback(env []byte, msg []byte,
-	gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI,
-	querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
-
-	// Write environment data to memory
-	envPtr, err := i.AllocateMemory(uint64(len(env)))
-	if err != nil {
-		return nil, types.GasReport{}, err
-	}
-	if err := i.WriteMemory(uint32(envPtr), env); err != nil {
-		return nil, types.GasReport{}, err
-	}
-
-	// Write message data to memory
-	msgPtr, err := i.AllocateMemory(uint64(len(msg)))
-	if err != nil {
-		return nil, types.GasReport{}, err
-	}
-	if err := i.WriteMemory(uint32(msgPtr), msg); err != nil {
-		return nil, types.GasReport{}, err
-	}
-
-	// Call ibc_destination_callback function
-	results, err := i.module.ExportedFunction("ibc_destination_callback").Call(context.Background(), envPtr, msgPtr)
-	if err != nil {
-		return nil, types.GasReport{}, err
-	}
-
-	// Read result from memory
-	resultPtr := DecodeU32(results[0])
-	resultLen := DecodeU32(results[1])
-	result, err := i.ReadMemory(resultPtr, resultLen)
+	result, err := i.readResult(resultPtr)
 	if err != nil {
 		return nil, types.GasReport{}, err
 	}
