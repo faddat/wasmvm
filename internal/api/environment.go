@@ -9,12 +9,13 @@ import (
 
 // Environment represents the environment for a Wasm contract
 type Environment struct {
-	Code     []byte
-	Store    types.KVStore
-	API      types.GoAPI
-	Querier  types.Querier
-	Block    BlockInfo
-	Contract ContractInfo
+	Code        []byte
+	Store       types.KVStore
+	API         types.GoAPI
+	Querier     types.Querier
+	Block       BlockInfo
+	Contract    ContractInfo
+	Transaction *TransactionInfo
 }
 
 // BlockInfo contains information about the current block
@@ -28,6 +29,11 @@ type BlockInfo struct {
 type ContractInfo struct {
 	Address string
 	Creator string
+}
+
+// TransactionInfo contains information about the current transaction
+type TransactionInfo struct {
+	Index uint32
 }
 
 // Validate checks if all required fields are set
@@ -48,7 +54,7 @@ func (e *Environment) Validate() error {
 }
 
 // NewEnvironment creates a new environment with the given parameters
-func NewEnvironment(code []byte, store types.KVStore, api *types.GoAPI, querier *types.Querier, block BlockInfo, contract ContractInfo) (*Environment, error) {
+func NewEnvironment(code []byte, store types.KVStore, api *types.GoAPI, querier *types.Querier, block BlockInfo, contract ContractInfo, transaction *TransactionInfo) (*Environment, error) {
 	if api == nil {
 		return nil, fmt.Errorf("api is required")
 	}
@@ -57,12 +63,13 @@ func NewEnvironment(code []byte, store types.KVStore, api *types.GoAPI, querier 
 	}
 
 	env := &Environment{
-		Code:     code,
-		Store:    store,
-		API:      *api,
-		Querier:  *querier,
-		Block:    block,
-		Contract: contract,
+		Code:        code,
+		Store:       store,
+		API:         *api,
+		Querier:     *querier,
+		Block:       block,
+		Contract:    contract,
+		Transaction: transaction,
 	}
 
 	if err := env.Validate(); err != nil {
@@ -73,7 +80,7 @@ func NewEnvironment(code []byte, store types.KVStore, api *types.GoAPI, querier 
 }
 
 // UpdateEnvironment updates the environment with new parameters
-func (e *Environment) UpdateEnvironment(store types.KVStore, api *types.GoAPI, querier *types.Querier) error {
+func (e *Environment) UpdateEnvironment(store types.KVStore, api *types.GoAPI, querier *types.Querier, transaction *TransactionInfo) error {
 	if api == nil {
 		return fmt.Errorf("api is required")
 	}
@@ -84,6 +91,7 @@ func (e *Environment) UpdateEnvironment(store types.KVStore, api *types.GoAPI, q
 	e.Store = store
 	e.API = *api
 	e.Querier = *querier
+	e.Transaction = transaction
 
 	return e.Validate()
 }

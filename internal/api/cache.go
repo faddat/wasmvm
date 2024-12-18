@@ -20,6 +20,7 @@ type Cache struct {
 	lockfile *os.File
 	pinned   sync.Map // map[string]bool
 	metrics  types.Metrics
+	codes    sync.Map // map[string][]byte
 }
 
 // InitCache initializes a new Wazero cache
@@ -79,8 +80,9 @@ func StoreCode(cache Cache, wasm []byte) ([]byte, error) {
 		return nil, fmt.Errorf("failed to compile module: %v", err)
 	}
 
-	// Store module
+	// Store module and original code
 	cache.modules.Store(string(checksum), module)
+	cache.codes.Store(string(checksum), wasm)
 
 	return checksum, nil
 }
@@ -100,9 +102,10 @@ func RemoveCode(cache Cache, checksum []byte) error {
 
 // GetCode retrieves the original Wasm code
 func GetCode(cache Cache, checksum []byte) ([]byte, error) {
-	// In Wazero implementation, we don't store the original code
-	// This is a limitation compared to the C implementation
-	return nil, fmt.Errorf("getting original code not supported in Wazero implementation")
+	if code, ok := cache.codes.Load(string(checksum)); ok {
+		return code.([]byte), nil
+	}
+	return nil, fmt.Errorf("code not found for checksum %x", checksum)
 }
 
 // Pin pins a module in memory

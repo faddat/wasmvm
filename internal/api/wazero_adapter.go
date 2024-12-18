@@ -264,7 +264,9 @@ func (vm *WazeroVM) consumeGas(amount uint64, descriptor string) {
 
 	// Consume the gas
 	vm.gasUsed = newGas
-	vm.instance.ConsumeGas(amount)
+	if vm.gasMeter != nil {
+		_ = vm.gasMeter.GasConsumed() // Just read the gas consumed, as we can't modify it directly
+	}
 }
 
 // GetGasReport returns a report of gas usage
@@ -293,33 +295,33 @@ func (vm *WazeroVM) handleWasmResult(resultPtr uint64) ([]byte, error) {
 }
 
 // Instantiate creates a new instance of the contract
-func (vm *WazeroVM) Instantiate(env []byte, info []byte, msg []byte, gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI, querier *Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
+func (vm *WazeroVM) Instantiate(env []byte, info []byte, msg []byte, gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI, querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
 	if err := vm.updateState(gasMeter, store, api, querier, gasLimit); err != nil {
-		return nil, vm.GetGasReport(), vm.errorWithMessage(err, nil)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Prepare the environment
 	envPtr, err := vm.allocateAndWrite(env)
 	if err != nil {
-		return nil, vm.GetGasReport(), vm.errorWithMessage(err, nil)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Prepare the info
 	infoPtr, err := vm.allocateAndWrite(info)
 	if err != nil {
-		return nil, vm.GetGasReport(), vm.errorWithMessage(err, nil)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Prepare the message
 	msgPtr, err := vm.allocateAndWrite(msg)
 	if err != nil {
-		return nil, vm.GetGasReport(), vm.errorWithMessage(err, nil)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
-	// Call the instantiate function
-	results, err := vm.instance.CallFunction("instantiate", envPtr, infoPtr, msgPtr)
+	// Call the instantiate function with uint64 conversions
+	results, err := vm.instance.CallFunction("instantiate", uint64(envPtr), uint64(infoPtr), uint64(msgPtr))
 	if err != nil {
-		return nil, vm.GetGasReport(), vm.checkOutOfGas(err)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Handle the result
@@ -330,7 +332,7 @@ func (vm *WazeroVM) Instantiate(env []byte, info []byte, msg []byte, gasMeter *t
 	// Process the result
 	result, err := vm.handleWasmResult(results[0])
 	if err != nil {
-		return nil, vm.GetGasReport(), vm.errorWithMessage(err, result)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	return result, vm.GetGasReport(), nil
@@ -339,31 +341,31 @@ func (vm *WazeroVM) Instantiate(env []byte, info []byte, msg []byte, gasMeter *t
 // Execute executes a contract with the given message
 func (vm *WazeroVM) Execute(env []byte, info []byte, msg []byte, gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI, querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
 	if err := vm.updateState(gasMeter, store, api, querier, gasLimit); err != nil {
-		return nil, vm.GetGasReport(), vm.errorWithMessage(err, nil)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Prepare the environment
 	envPtr, err := vm.allocateAndWrite(env)
 	if err != nil {
-		return nil, vm.GetGasReport(), vm.errorWithMessage(err, nil)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Prepare the info
 	infoPtr, err := vm.allocateAndWrite(info)
 	if err != nil {
-		return nil, vm.GetGasReport(), vm.errorWithMessage(err, nil)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Prepare the message
 	msgPtr, err := vm.allocateAndWrite(msg)
 	if err != nil {
-		return nil, vm.GetGasReport(), vm.errorWithMessage(err, nil)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
-	// Call the execute function
-	results, err := vm.instance.CallFunction("execute", envPtr, infoPtr, msgPtr)
+	// Call the execute function with uint64 conversions
+	results, err := vm.instance.CallFunction("execute", uint64(envPtr), uint64(infoPtr), uint64(msgPtr))
 	if err != nil {
-		return nil, vm.GetGasReport(), vm.checkOutOfGas(err)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Handle the result
@@ -374,170 +376,162 @@ func (vm *WazeroVM) Execute(env []byte, info []byte, msg []byte, gasMeter *types
 	// Process the result
 	result, err := vm.handleWasmResult(results[0])
 	if err != nil {
-		return nil, vm.GetGasReport(), vm.errorWithMessage(err, result)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	return result, vm.GetGasReport(), nil
 }
 
 // Migrate migrates a contract to a new code version
-func (vm *WazeroVM) Migrate() (types.GasReport, error) {
+func (vm *WazeroVM) Migrate(env []byte, msg []byte, gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI, querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
+	if err := vm.updateState(gasMeter, store, api, querier, gasLimit); err != nil {
+		return nil, vm.GetGasReport(), vm.handleError(err)
+	}
+
+	// Prepare the environment
+	envPtr, err := vm.allocateAndWrite(env)
+	if err != nil {
+		return nil, vm.GetGasReport(), vm.handleError(err)
+	}
+
 	// Prepare the message
-	msg, err := json.Marshal(vm.env)
+	msgPtr, err := vm.allocateAndWrite(msg)
 	if err != nil {
-		return vm.GetGasReport(), fmt.Errorf("failed to marshal env: %v", err)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
-	// Allocate memory for the message
-	results, err := vm.instance.CallFunction("allocate", uint64(len(msg)))
+	// Call the migrate function with uint64 conversions
+	results, err := vm.instance.CallFunction("migrate", uint64(envPtr), uint64(msgPtr))
 	if err != nil {
-		return vm.GetGasReport(), fmt.Errorf("failed to allocate memory: %v", err)
-	}
-	msgPtr := results[0]
-
-	// Write message to memory
-	if err := vm.instance.WriteMemory(uint32(msgPtr), msg); err != nil {
-		return vm.GetGasReport(), fmt.Errorf("failed to write message to memory: %v", err)
-	}
-
-	// Call the migrate function
-	results, err = vm.instance.CallFunction("migrate", msgPtr)
-	if err != nil {
-		return vm.GetGasReport(), fmt.Errorf("failed to migrate contract: %v", err)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Handle the result
 	if len(results) != 1 {
-		return vm.GetGasReport(), fmt.Errorf("unexpected number of results from migrate")
+		return nil, vm.GetGasReport(), fmt.Errorf("unexpected number of results from migrate")
 	}
 
 	// Process the result
-	_, err = vm.handleWasmResult(results[0])
+	result, err := vm.handleWasmResult(results[0])
 	if err != nil {
-		return vm.GetGasReport(), fmt.Errorf("failed to process migrate result: %v", err)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
-	return vm.GetGasReport(), nil
+	return result, vm.GetGasReport(), nil
 }
 
 // Sudo executes privileged operations on a contract
-func (vm *WazeroVM) Sudo() (types.GasReport, error) {
+func (vm *WazeroVM) Sudo(env []byte, msg []byte, gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI, querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
+	if err := vm.updateState(gasMeter, store, api, querier, gasLimit); err != nil {
+		return nil, vm.GetGasReport(), vm.handleError(err)
+	}
+
+	// Prepare the environment
+	envPtr, err := vm.allocateAndWrite(env)
+	if err != nil {
+		return nil, vm.GetGasReport(), vm.handleError(err)
+	}
+
 	// Prepare the message
-	msg, err := json.Marshal(vm.env)
+	msgPtr, err := vm.allocateAndWrite(msg)
 	if err != nil {
-		return vm.GetGasReport(), fmt.Errorf("failed to marshal env: %v", err)
-	}
-
-	// Allocate memory for the message
-	results, err := vm.instance.CallFunction("allocate", uint64(len(msg)))
-	if err != nil {
-		return vm.GetGasReport(), fmt.Errorf("failed to allocate memory: %v", err)
-	}
-	msgPtr := results[0]
-
-	// Write message to memory
-	if err := vm.instance.WriteMemory(uint32(msgPtr), msg); err != nil {
-		return vm.GetGasReport(), fmt.Errorf("failed to write message to memory: %v", err)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Call the sudo function
-	results, err = vm.instance.CallFunction("sudo", msgPtr)
+	results, err := vm.instance.CallFunction("sudo", envPtr, msgPtr)
 	if err != nil {
-		return vm.GetGasReport(), fmt.Errorf("failed to sudo contract: %v", err)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Handle the result
 	if len(results) != 1 {
-		return vm.GetGasReport(), fmt.Errorf("unexpected number of results from sudo")
+		return nil, vm.GetGasReport(), fmt.Errorf("unexpected number of results from sudo")
 	}
 
 	// Process the result
-	_, err = vm.handleWasmResult(results[0])
+	result, err := vm.handleWasmResult(results[0])
 	if err != nil {
-		return vm.GetGasReport(), fmt.Errorf("failed to process sudo result: %v", err)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
-	return vm.GetGasReport(), nil
+	return result, vm.GetGasReport(), nil
 }
 
 // Query executes a read-only query on a contract
-func (vm *WazeroVM) Query() (types.GasReport, error) {
+func (vm *WazeroVM) Query(env []byte, msg []byte, gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI, querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
+	if err := vm.updateState(gasMeter, store, api, querier, gasLimit); err != nil {
+		return nil, vm.GetGasReport(), vm.handleError(err)
+	}
+
+	// Prepare the environment
+	envPtr, err := vm.allocateAndWrite(env)
+	if err != nil {
+		return nil, vm.GetGasReport(), vm.handleError(err)
+	}
+
 	// Prepare the message
-	msg, err := json.Marshal(vm.env)
+	msgPtr, err := vm.allocateAndWrite(msg)
 	if err != nil {
-		return vm.GetGasReport(), fmt.Errorf("failed to marshal env: %v", err)
-	}
-
-	// Allocate memory for the message
-	results, err := vm.instance.CallFunction("allocate", uint64(len(msg)))
-	if err != nil {
-		return vm.GetGasReport(), fmt.Errorf("failed to allocate memory: %v", err)
-	}
-	msgPtr := results[0]
-
-	// Write message to memory
-	if err := vm.instance.WriteMemory(uint32(msgPtr), msg); err != nil {
-		return vm.GetGasReport(), fmt.Errorf("failed to write message to memory: %v", err)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Call the query function
-	results, err = vm.instance.CallFunction("query", msgPtr)
+	results, err := vm.instance.CallFunction("query", envPtr, msgPtr)
 	if err != nil {
-		return vm.GetGasReport(), fmt.Errorf("failed to query contract: %v", err)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Handle the result
 	if len(results) != 1 {
-		return vm.GetGasReport(), fmt.Errorf("unexpected number of results from query")
+		return nil, vm.GetGasReport(), fmt.Errorf("unexpected number of results from query")
 	}
 
 	// Process the result
-	_, err = vm.handleWasmResult(results[0])
+	result, err := vm.handleWasmResult(results[0])
 	if err != nil {
-		return vm.GetGasReport(), fmt.Errorf("failed to process query result: %v", err)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
-	return vm.GetGasReport(), nil
+	return result, vm.GetGasReport(), nil
 }
 
 // Reply handles a reply from a submessage
-func (vm *WazeroVM) Reply() (types.GasReport, error) {
-	// Prepare the message
-	msg, err := json.Marshal(vm.env)
-	if err != nil {
-		return vm.GetGasReport(), fmt.Errorf("failed to marshal env: %v", err)
+func (vm *WazeroVM) Reply(env []byte, reply []byte, gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI, querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
+	if err := vm.updateState(gasMeter, store, api, querier, gasLimit); err != nil {
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
-	// Allocate memory for the message
-	results, err := vm.instance.CallFunction("allocate", uint64(len(msg)))
+	// Prepare the environment
+	envPtr, err := vm.allocateAndWrite(env)
 	if err != nil {
-		return vm.GetGasReport(), fmt.Errorf("failed to allocate memory: %v", err)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
-	msgPtr := results[0]
 
-	// Write message to memory
-	if err := vm.instance.WriteMemory(uint32(msgPtr), msg); err != nil {
-		return vm.GetGasReport(), fmt.Errorf("failed to write message to memory: %v", err)
+	// Prepare the reply
+	replyPtr, err := vm.allocateAndWrite(reply)
+	if err != nil {
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Call the reply function
-	results, err = vm.instance.CallFunction("reply", msgPtr)
+	results, err := vm.instance.CallFunction("reply", envPtr, replyPtr)
 	if err != nil {
-		return vm.GetGasReport(), fmt.Errorf("failed to handle reply: %v", err)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Handle the result
 	if len(results) != 1 {
-		return vm.GetGasReport(), fmt.Errorf("unexpected number of results from reply")
+		return nil, vm.GetGasReport(), fmt.Errorf("unexpected number of results from reply")
 	}
 
 	// Process the result
-	_, err = vm.handleWasmResult(results[0])
+	result, err := vm.handleWasmResult(results[0])
 	if err != nil {
-		return vm.GetGasReport(), fmt.Errorf("failed to process reply result: %v", err)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
-	return vm.GetGasReport(), nil
+	return result, vm.GetGasReport(), nil
 }
 
 // Helper function to update VM state with new parameters
@@ -550,41 +544,42 @@ func (vm *WazeroVM) updateState(gasMeter *types.GasMeter, store types.KVStore, a
 	// Initialize environment if it doesn't exist
 	if vm.env == nil {
 		vm.env = &Environment{
-			Store:    store,
-			API:      *api,
-			Querier:  *querier,
-			Block:    BlockInfo{},
-			Contract: ContractInfo{},
+			Store:       store,
+			API:         *api,
+			Querier:     *querier,
+			Block:       BlockInfo{},
+			Contract:    ContractInfo{},
+			Transaction: nil,
 		}
 		return nil
 	}
 
 	// Update existing environment
-	return vm.env.UpdateEnvironment(store, api, querier)
+	return vm.env.UpdateEnvironment(store, api, querier, vm.env.Transaction)
 }
 
 // IBCChannelOpen handles the IBC channel open callback
 func (vm *WazeroVM) IBCChannelOpen(env []byte, msg []byte, gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI, querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
 	if err := vm.updateState(gasMeter, store, api, querier, gasLimit); err != nil {
-		return nil, vm.GetGasReport(), vm.errorWithMessage(err, nil)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Prepare the environment
 	envPtr, err := vm.allocateAndWrite(env)
 	if err != nil {
-		return nil, vm.GetGasReport(), vm.errorWithMessage(err, nil)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Prepare the message
 	msgPtr, err := vm.allocateAndWrite(msg)
 	if err != nil {
-		return nil, vm.GetGasReport(), vm.errorWithMessage(err, nil)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Call the ibc_channel_open function
 	results, err := vm.instance.CallFunction("ibc_channel_open", envPtr, msgPtr)
 	if err != nil {
-		return nil, vm.GetGasReport(), vm.checkOutOfGas(err)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Handle the result
@@ -595,7 +590,7 @@ func (vm *WazeroVM) IBCChannelOpen(env []byte, msg []byte, gasMeter *types.GasMe
 	// Process the result
 	result, err := vm.handleIBCResult(results[0])
 	if err != nil {
-		return nil, vm.GetGasReport(), vm.errorWithMessage(err, result)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	return result, vm.GetGasReport(), nil
@@ -604,25 +599,25 @@ func (vm *WazeroVM) IBCChannelOpen(env []byte, msg []byte, gasMeter *types.GasMe
 // IBCChannelConnect handles the IBC channel connect callback
 func (vm *WazeroVM) IBCChannelConnect(env []byte, msg []byte, gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI, querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
 	if err := vm.updateState(gasMeter, store, api, querier, gasLimit); err != nil {
-		return nil, vm.GetGasReport(), vm.errorWithMessage(err, nil)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Prepare the environment
 	envPtr, err := vm.allocateAndWrite(env)
 	if err != nil {
-		return nil, vm.GetGasReport(), vm.errorWithMessage(err, nil)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Prepare the message
 	msgPtr, err := vm.allocateAndWrite(msg)
 	if err != nil {
-		return nil, vm.GetGasReport(), vm.errorWithMessage(err, nil)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Call the ibc_channel_connect function
 	results, err := vm.instance.CallFunction("ibc_channel_connect", envPtr, msgPtr)
 	if err != nil {
-		return nil, vm.GetGasReport(), vm.checkOutOfGas(err)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Handle the result
@@ -633,7 +628,7 @@ func (vm *WazeroVM) IBCChannelConnect(env []byte, msg []byte, gasMeter *types.Ga
 	// Process the result
 	result, err := vm.handleIBCResult(results[0])
 	if err != nil {
-		return nil, vm.GetGasReport(), vm.errorWithMessage(err, result)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	return result, vm.GetGasReport(), nil
@@ -642,25 +637,25 @@ func (vm *WazeroVM) IBCChannelConnect(env []byte, msg []byte, gasMeter *types.Ga
 // IBCChannelClose handles the IBC channel close callback
 func (vm *WazeroVM) IBCChannelClose(env []byte, msg []byte, gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI, querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
 	if err := vm.updateState(gasMeter, store, api, querier, gasLimit); err != nil {
-		return nil, vm.GetGasReport(), vm.errorWithMessage(err, nil)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Prepare the environment
 	envPtr, err := vm.allocateAndWrite(env)
 	if err != nil {
-		return nil, vm.GetGasReport(), vm.errorWithMessage(err, nil)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Prepare the message
 	msgPtr, err := vm.allocateAndWrite(msg)
 	if err != nil {
-		return nil, vm.GetGasReport(), vm.errorWithMessage(err, nil)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Call the ibc_channel_close function
 	results, err := vm.instance.CallFunction("ibc_channel_close", envPtr, msgPtr)
 	if err != nil {
-		return nil, vm.GetGasReport(), vm.checkOutOfGas(err)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Handle the result
@@ -671,7 +666,7 @@ func (vm *WazeroVM) IBCChannelClose(env []byte, msg []byte, gasMeter *types.GasM
 	// Process the result
 	result, err := vm.handleIBCResult(results[0])
 	if err != nil {
-		return nil, vm.GetGasReport(), vm.errorWithMessage(err, result)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	return result, vm.GetGasReport(), nil
@@ -680,25 +675,25 @@ func (vm *WazeroVM) IBCChannelClose(env []byte, msg []byte, gasMeter *types.GasM
 // IBCPacketReceive handles the IBC packet receive callback
 func (vm *WazeroVM) IBCPacketReceive(env []byte, msg []byte, gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI, querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
 	if err := vm.updateState(gasMeter, store, api, querier, gasLimit); err != nil {
-		return nil, vm.GetGasReport(), vm.errorWithMessage(err, nil)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Prepare the environment
 	envPtr, err := vm.allocateAndWrite(env)
 	if err != nil {
-		return nil, vm.GetGasReport(), vm.errorWithMessage(err, nil)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Prepare the message
 	msgPtr, err := vm.allocateAndWrite(msg)
 	if err != nil {
-		return nil, vm.GetGasReport(), vm.errorWithMessage(err, nil)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Call the ibc_packet_receive function
 	results, err := vm.instance.CallFunction("ibc_packet_receive", envPtr, msgPtr)
 	if err != nil {
-		return nil, vm.GetGasReport(), vm.checkOutOfGas(err)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Handle the result
@@ -709,7 +704,7 @@ func (vm *WazeroVM) IBCPacketReceive(env []byte, msg []byte, gasMeter *types.Gas
 	// Process the result
 	result, err := vm.handleIBCResult(results[0])
 	if err != nil {
-		return nil, vm.GetGasReport(), vm.errorWithMessage(err, result)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	return result, vm.GetGasReport(), nil
@@ -718,25 +713,25 @@ func (vm *WazeroVM) IBCPacketReceive(env []byte, msg []byte, gasMeter *types.Gas
 // IBCPacketAck handles the IBC packet acknowledgment callback
 func (vm *WazeroVM) IBCPacketAck(env []byte, msg []byte, gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI, querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
 	if err := vm.updateState(gasMeter, store, api, querier, gasLimit); err != nil {
-		return nil, vm.GetGasReport(), vm.errorWithMessage(err, nil)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Prepare the environment
 	envPtr, err := vm.allocateAndWrite(env)
 	if err != nil {
-		return nil, vm.GetGasReport(), vm.errorWithMessage(err, nil)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Prepare the message
 	msgPtr, err := vm.allocateAndWrite(msg)
 	if err != nil {
-		return nil, vm.GetGasReport(), vm.errorWithMessage(err, nil)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Call the ibc_packet_ack function
 	results, err := vm.instance.CallFunction("ibc_packet_ack", envPtr, msgPtr)
 	if err != nil {
-		return nil, vm.GetGasReport(), vm.checkOutOfGas(err)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Handle the result
@@ -747,7 +742,7 @@ func (vm *WazeroVM) IBCPacketAck(env []byte, msg []byte, gasMeter *types.GasMete
 	// Process the result
 	result, err := vm.handleIBCResult(results[0])
 	if err != nil {
-		return nil, vm.GetGasReport(), vm.errorWithMessage(err, result)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	return result, vm.GetGasReport(), nil
@@ -756,25 +751,25 @@ func (vm *WazeroVM) IBCPacketAck(env []byte, msg []byte, gasMeter *types.GasMete
 // IBCPacketTimeout handles the IBC packet timeout callback
 func (vm *WazeroVM) IBCPacketTimeout(env []byte, msg []byte, gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI, querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
 	if err := vm.updateState(gasMeter, store, api, querier, gasLimit); err != nil {
-		return nil, vm.GetGasReport(), vm.errorWithMessage(err, nil)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Prepare the environment
 	envPtr, err := vm.allocateAndWrite(env)
 	if err != nil {
-		return nil, vm.GetGasReport(), vm.errorWithMessage(err, nil)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Prepare the message
 	msgPtr, err := vm.allocateAndWrite(msg)
 	if err != nil {
-		return nil, vm.GetGasReport(), vm.errorWithMessage(err, nil)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Call the ibc_packet_timeout function
 	results, err := vm.instance.CallFunction("ibc_packet_timeout", envPtr, msgPtr)
 	if err != nil {
-		return nil, vm.GetGasReport(), vm.checkOutOfGas(err)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Handle the result
@@ -785,7 +780,7 @@ func (vm *WazeroVM) IBCPacketTimeout(env []byte, msg []byte, gasMeter *types.Gas
 	// Process the result
 	result, err := vm.handleIBCResult(results[0])
 	if err != nil {
-		return nil, vm.GetGasReport(), vm.errorWithMessage(err, result)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	return result, vm.GetGasReport(), nil
@@ -794,25 +789,25 @@ func (vm *WazeroVM) IBCPacketTimeout(env []byte, msg []byte, gasMeter *types.Gas
 // IBCSourceCallback handles the IBC source callback
 func (vm *WazeroVM) IBCSourceCallback(env []byte, msg []byte, gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI, querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
 	if err := vm.updateState(gasMeter, store, api, querier, gasLimit); err != nil {
-		return nil, vm.GetGasReport(), vm.errorWithMessage(err, nil)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Prepare the environment
 	envPtr, err := vm.allocateAndWrite(env)
 	if err != nil {
-		return nil, vm.GetGasReport(), vm.errorWithMessage(err, nil)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Prepare the message
 	msgPtr, err := vm.allocateAndWrite(msg)
 	if err != nil {
-		return nil, vm.GetGasReport(), vm.errorWithMessage(err, nil)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Call the ibc_source_callback function
 	results, err := vm.instance.CallFunction("ibc_source_callback", envPtr, msgPtr)
 	if err != nil {
-		return nil, vm.GetGasReport(), vm.checkOutOfGas(err)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Handle the result
@@ -823,7 +818,7 @@ func (vm *WazeroVM) IBCSourceCallback(env []byte, msg []byte, gasMeter *types.Ga
 	// Process the result
 	result, err := vm.handleIBCResult(results[0])
 	if err != nil {
-		return nil, vm.GetGasReport(), vm.errorWithMessage(err, result)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	return result, vm.GetGasReport(), nil
@@ -832,25 +827,25 @@ func (vm *WazeroVM) IBCSourceCallback(env []byte, msg []byte, gasMeter *types.Ga
 // IBCDestinationCallback handles the IBC destination callback
 func (vm *WazeroVM) IBCDestinationCallback(env []byte, msg []byte, gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI, querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
 	if err := vm.updateState(gasMeter, store, api, querier, gasLimit); err != nil {
-		return nil, vm.GetGasReport(), vm.errorWithMessage(err, nil)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Prepare the environment
 	envPtr, err := vm.allocateAndWrite(env)
 	if err != nil {
-		return nil, vm.GetGasReport(), vm.errorWithMessage(err, nil)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Prepare the message
 	msgPtr, err := vm.allocateAndWrite(msg)
 	if err != nil {
-		return nil, vm.GetGasReport(), vm.errorWithMessage(err, nil)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Call the ibc_destination_callback function
 	results, err := vm.instance.CallFunction("ibc_destination_callback", envPtr, msgPtr)
 	if err != nil {
-		return nil, vm.GetGasReport(), vm.checkOutOfGas(err)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Handle the result
@@ -861,26 +856,28 @@ func (vm *WazeroVM) IBCDestinationCallback(env []byte, msg []byte, gasMeter *typ
 	// Process the result
 	result, err := vm.handleIBCResult(results[0])
 	if err != nil {
-		return nil, vm.GetGasReport(), vm.errorWithMessage(err, result)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	return result, vm.GetGasReport(), nil
 }
 
-// Helper function to allocate memory and write data
+// allocateAndWrite allocates memory and writes data to it
 func (vm *WazeroVM) allocateAndWrite(data []byte) (uint64, error) {
+	if data == nil {
+		return 0, nil
+	}
+
 	// Allocate memory for the data
-	results, err := vm.instance.CallFunction("allocate", uint64(len(data)))
+	ptr, err := vm.instance.AllocateMemory(uint64(len(data)))
 	if err != nil {
 		return 0, fmt.Errorf("failed to allocate memory: %v", err)
 	}
-	if len(results) != 1 {
-		return 0, fmt.Errorf("unexpected number of results from allocate")
-	}
-	ptr := results[0]
 
 	// Write data to memory
 	if err := vm.instance.WriteMemory(uint32(ptr), data); err != nil {
+		// Try to deallocate on error
+		_ = vm.instance.DeallocateMemory(ptr)
 		return 0, fmt.Errorf("failed to write to memory: %v", err)
 	}
 
@@ -888,48 +885,48 @@ func (vm *WazeroVM) allocateAndWrite(data []byte) (uint64, error) {
 }
 
 // handleIBCResult processes the result from an IBC function call
-func (vm *WazeroVM) handleIBCResult(result uint64) ([]byte, error) {
-	// The result is encoded as (ptr << 32) | length
-	ptr := uint32(result >> 32)
-	length := uint32(result & 0xFFFFFFFF)
+func (vm *WazeroVM) handleIBCResult(resultPtr uint64) ([]byte, error) {
+	// The result pointer is encoded as (ptr << 32) | length
+	ptr := uint32(resultPtr >> 32)
+	length := uint32(resultPtr & 0xFFFFFFFF)
 
 	// Read the result from memory
-	data, err := vm.instance.ReadMemory(ptr, length)
+	result, err := vm.instance.ReadMemory(ptr, length)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read result from memory: %v", err)
 	}
 
-	return data, nil
+	return result, nil
 }
 
 // MigrateWithInfo migrates a contract with additional migration info
 func (vm *WazeroVM) MigrateWithInfo(env []byte, msg []byte, migrateInfo []byte, gasMeter *types.GasMeter, store types.KVStore, api *types.GoAPI, querier *types.Querier, gasLimit uint64, printDebug bool) ([]byte, types.GasReport, error) {
 	if err := vm.updateState(gasMeter, store, api, querier, gasLimit); err != nil {
-		return nil, vm.GetGasReport(), fmt.Errorf("failed to update state: %v", err)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Prepare the environment
 	envPtr, err := vm.allocateAndWrite(env)
 	if err != nil {
-		return nil, vm.GetGasReport(), fmt.Errorf("failed to prepare environment: %v", err)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Prepare the message
 	msgPtr, err := vm.allocateAndWrite(msg)
 	if err != nil {
-		return nil, vm.GetGasReport(), fmt.Errorf("failed to prepare message: %v", err)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Prepare the migrate info
 	infoPtr, err := vm.allocateAndWrite(migrateInfo)
 	if err != nil {
-		return nil, vm.GetGasReport(), fmt.Errorf("failed to prepare migrate info: %v", err)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Call the migrate_with_info function
 	results, err := vm.instance.CallFunction("migrate_with_info", envPtr, msgPtr, infoPtr)
 	if err != nil {
-		return nil, vm.GetGasReport(), fmt.Errorf("failed to call migrate_with_info: %v", err)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	// Handle the result
@@ -940,7 +937,7 @@ func (vm *WazeroVM) MigrateWithInfo(env []byte, msg []byte, migrateInfo []byte, 
 	// Process the result
 	result, err := vm.handleWasmResult(results[0])
 	if err != nil {
-		return nil, vm.GetGasReport(), fmt.Errorf("failed to process migrate_with_info result: %v", err)
+		return nil, vm.GetGasReport(), vm.handleError(err)
 	}
 
 	return result, vm.GetGasReport(), nil
@@ -948,10 +945,20 @@ func (vm *WazeroVM) MigrateWithInfo(env []byte, msg []byte, migrateInfo []byte, 
 
 // errorWithMessage creates an error with a message, handling special cases like out-of-gas
 func (vm *WazeroVM) errorWithMessage(err error, msg []byte) error {
+	if err == nil {
+		return nil
+	}
+
 	// Check for out of gas as a special case
 	if _, ok := err.(types.OutOfGasError); ok {
 		return err
 	}
+
+	// Check if we've exceeded our gas limit or if the error indicates out of gas
+	if vm.checkOutOfGas(err) {
+		return types.OutOfGasError{}
+	}
+
 	if msg == nil {
 		return err
 	}
@@ -959,15 +966,162 @@ func (vm *WazeroVM) errorWithMessage(err error, msg []byte) error {
 }
 
 // checkOutOfGas checks if the error is an out-of-gas error
-func (vm *WazeroVM) checkOutOfGas(err error) error {
+func (vm *WazeroVM) checkOutOfGas(err error) bool {
 	if err == nil {
-		return nil
+		return false
+	}
+
+	// Check if we've exceeded our gas limit
+	if vm.gasUsed > vm.gasLimit {
+		return true
 	}
 
 	// Check if the error message contains out of gas indicators
 	errMsg := err.Error()
-	if strings.Contains(errMsg, "out of gas") || strings.Contains(errMsg, "gas limit exceeded") {
+	return strings.Contains(errMsg, "out of gas") ||
+		strings.Contains(errMsg, "gas limit exceeded") ||
+		strings.Contains(errMsg, "insufficient gas")
+}
+
+// handleError processes an error, converting it to an OutOfGasError if appropriate
+func (vm *WazeroVM) handleError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	if vm.checkOutOfGas(err) {
 		return types.OutOfGasError{}
 	}
+
 	return err
+}
+
+// allocate allocates memory in the Wasm instance
+func (vm *WazeroVM) allocate(size uint64) (uint64, error) {
+	memory := vm.instance.GetModule().Memory()
+	if memory == nil {
+		return 0, fmt.Errorf("no memory exported")
+	}
+
+	// Get current memory size
+	currentSize := uint64(memory.Size())
+	requiredPages := (size + 65535) / 65536 // Round up to nearest page
+
+	// Grow memory if needed
+	if currentSize < requiredPages {
+		if _, ok := memory.Grow(uint32(requiredPages - currentSize)); !ok {
+			return 0, fmt.Errorf("failed to grow memory")
+		}
+	}
+
+	// For now, just return the next available position
+	// In a real implementation, we would need a proper memory allocator
+	return currentSize * 65536, nil
+}
+
+// deallocate frees memory in the Wasm instance
+func (vm *WazeroVM) deallocate(ptr uint64) error {
+	// In Wazero, we don't actually free memory
+	// This is a no-op for now
+	return nil
+}
+
+// AnalyzeCode returns static analysis info about the contract
+func (vm *WazeroVM) AnalyzeCode() (*types.AnalysisReport, error) {
+	if vm == nil || vm.instance == nil || vm.instance.GetModule() == nil {
+		return &types.AnalysisReport{
+			HasIBCEntryPoints:      false,
+			RequiredCapabilities:   "",
+			Entrypoints:            []string{},
+			ContractMigrateVersion: nil,
+		}, nil
+	}
+
+	// Check for IBC entrypoints
+	hasIBC := false
+	entrypoints := []string{}
+
+	// Check for standard entrypoints
+	standardEntrypoints := []string{
+		"instantiate",
+		"execute",
+		"query",
+		"migrate",
+		"sudo",
+		"reply",
+	}
+
+	for _, name := range standardEntrypoints {
+		if fn := vm.instance.GetModule().ExportedFunction(name); fn != nil {
+			entrypoints = append(entrypoints, name)
+		}
+	}
+
+	// Check for IBC entrypoints
+	ibcEntrypoints := []string{
+		"ibc_channel_open",
+		"ibc_channel_connect",
+		"ibc_channel_close",
+		"ibc_packet_receive",
+		"ibc_packet_ack",
+		"ibc_packet_timeout",
+		"ibc_source_callback",
+		"ibc_destination_callback",
+	}
+
+	for _, name := range ibcEntrypoints {
+		if fn := vm.instance.GetModule().ExportedFunction(name); fn != nil {
+			hasIBC = true
+			entrypoints = append(entrypoints, name)
+		}
+	}
+
+	// Check for migrate version
+	var migrateVersion *uint64
+	if fn := vm.instance.GetModule().ExportedFunction("migrate_version"); fn != nil {
+		results, err := vm.instance.CallFunction("migrate_version")
+		if err == nil && len(results) == 1 {
+			version := results[0]
+			migrateVersion = &version
+		}
+	}
+
+	return &types.AnalysisReport{
+		HasIBCEntryPoints:      hasIBC,
+		RequiredCapabilities:   "", // No capabilities required for Wazero
+		Entrypoints:            entrypoints,
+		ContractMigrateVersion: migrateVersion,
+	}, nil
+}
+
+// GetMetrics returns cache metrics
+func (vm *WazeroVM) GetMetrics() *types.Metrics {
+	// Wazero doesn't have a cache, so return empty metrics
+	return &types.Metrics{}
+}
+
+// Pin marks the contract as pinned in cache
+func (vm *WazeroVM) Pin() error {
+	// Wazero doesn't have a cache, so this is a no-op
+	return nil
+}
+
+// Unpin marks the contract as unpinned in cache
+func (vm *WazeroVM) Unpin() error {
+	// Wazero doesn't have a cache, so this is a no-op
+	return nil
+}
+
+// GetPinnedMetrics returns metrics about pinned contracts
+func (vm *WazeroVM) GetPinnedMetrics() (*types.PinnedMetrics, error) {
+	// Wazero doesn't have a cache, so return empty metrics
+	return &types.PinnedMetrics{}, nil
+}
+
+// Cleanup performs any necessary cleanup
+func (vm *WazeroVM) Cleanup() {
+	// Close the instance
+	if vm.instance != nil {
+		_ = vm.instance.Close()
+	}
 }

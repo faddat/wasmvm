@@ -1,3 +1,6 @@
+//lib_libwasmvm.go:
+// 1. it can inspire the wrath of the compiler.
+
 package cosmwasm
 
 import (
