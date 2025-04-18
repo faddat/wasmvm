@@ -1,1 +1,10 @@
 too-many-arguments-threshold = 13
+# type_complexity allows functional lists
+type-complexity-threshold = 110
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+disallowed-names = []
+upper-case-acronyms-aggressive = false
+allow-useless-late-init = false
+# Add exception for FFI types with _t suffix
+upper-case-acronyms.allow-types = ["cache_t", "gas_meter_t"]
