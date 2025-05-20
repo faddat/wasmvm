@@ -1,13 +1,18 @@
 module github.com/CosmWasm/wasmvm/v3
 
-go 1.22
+go 1.22.0
+
+toolchain go1.23.8
 
 require (
 	github.com/google/btree v1.0.0
 	github.com/shamaton/msgpack/v2 v2.2.0
 	github.com/stretchr/testify v1.8.1
+	github.com/tetratelabs/wazero v0.0.0
 	golang.org/x/sys v0.16.0
 )
+
+replace github.com/tetratelabs/wazero => ./reference-code/wazero
 
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
