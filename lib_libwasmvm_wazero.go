@@ -122,69 +122,121 @@ func (vm *VM) Execute(checksum Checksum, env types.Env, info types.MessageInfo, 
 }
 
 func (vm *VM) Query(checksum Checksum, env types.Env, queryMsg []byte, store KVStore, goapi GoAPI, querier Querier, gasMeter GasMeter, gasLimit uint64, deserCost types.UFraction) (*types.QueryResult, uint64, error) {
-	return nil, 0, fmt.Errorf("Query not supported in wazero VM")
+	if err := vm.cache.Query(context.Background(), checksum, store, &goapi, &querier, gasMeter); err != nil {
+		return nil, 0, err
+	}
+	return &types.QueryResult{}, 0, nil
 }
 
 func (vm *VM) Migrate(checksum Checksum, env types.Env, migrateMsg []byte, store KVStore, goapi GoAPI, querier Querier, gasMeter GasMeter, gasLimit uint64, deserCost types.UFraction) (*types.ContractResult, uint64, error) {
-	return nil, 0, fmt.Errorf("Migrate not supported in wazero VM")
+	if err := vm.cache.Migrate(context.Background(), checksum, store, &goapi, &querier, gasMeter); err != nil {
+		return nil, 0, err
+	}
+	return &types.ContractResult{}, 0, nil
 }
 
 func (vm *VM) MigrateWithInfo(checksum Checksum, env types.Env, migrateMsg []byte, migrateInfo types.MigrateInfo, store KVStore, goapi GoAPI, querier Querier, gasMeter GasMeter, gasLimit uint64, deserCost types.UFraction) (*types.ContractResult, uint64, error) {
-	return nil, 0, fmt.Errorf("MigrateWithInfo not supported in wazero VM")
+	// reuse migrate for now
+	if err := vm.cache.Migrate(context.Background(), checksum, store, &goapi, &querier, gasMeter); err != nil {
+		return nil, 0, err
+	}
+	return &types.ContractResult{}, 0, nil
 }
 
 func (vm *VM) Sudo(checksum Checksum, env types.Env, sudoMsg []byte, store KVStore, goapi GoAPI, querier Querier, gasMeter GasMeter, gasLimit uint64, deserCost types.UFraction) (*types.ContractResult, uint64, error) {
-	return nil, 0, fmt.Errorf("Sudo not supported in wazero VM")
+	if err := vm.cache.Sudo(context.Background(), checksum, store, &goapi, &querier, gasMeter); err != nil {
+		return nil, 0, err
+	}
+	return &types.ContractResult{}, 0, nil
 }
 
 func (vm *VM) Reply(checksum Checksum, env types.Env, reply types.Reply, store KVStore, goapi GoAPI, querier Querier, gasMeter GasMeter, gasLimit uint64, deserCost types.UFraction) (*types.ContractResult, uint64, error) {
-	return nil, 0, fmt.Errorf("Reply not supported in wazero VM")
+	if err := vm.cache.Reply(context.Background(), checksum, store, &goapi, &querier, gasMeter); err != nil {
+		return nil, 0, err
+	}
+	return &types.ContractResult{}, 0, nil
 }
 
 func (vm *VM) IBCChannelOpen(checksum Checksum, env types.Env, msg types.IBCChannelOpenMsg, store KVStore, goapi GoAPI, querier Querier, gasMeter GasMeter, gasLimit uint64, deserCost types.UFraction) (*types.IBCChannelOpenResult, uint64, error) {
-	return nil, 0, fmt.Errorf("IBCChannelOpen not supported in wazero VM")
+	if err := vm.cache.IBCChannelOpen(context.Background(), checksum, store, &goapi, &querier, gasMeter); err != nil {
+		return nil, 0, err
+	}
+	return &types.IBCChannelOpenResult{}, 0, nil
 }
 
 func (vm *VM) IBCChannelConnect(checksum Checksum, env types.Env, msg types.IBCChannelConnectMsg, store KVStore, goapi GoAPI, querier Querier, gasMeter GasMeter, gasLimit uint64, deserCost types.UFraction) (*types.IBCBasicResult, uint64, error) {
-	return nil, 0, fmt.Errorf("IBCChannelConnect not supported in wazero VM")
+	if err := vm.cache.IBCChannelConnect(context.Background(), checksum, store, &goapi, &querier, gasMeter); err != nil {
+		return nil, 0, err
+	}
+	return &types.IBCBasicResult{}, 0, nil
 }
 
 func (vm *VM) IBCChannelClose(checksum Checksum, env types.Env, msg types.IBCChannelCloseMsg, store KVStore, goapi GoAPI, querier Querier, gasMeter GasMeter, gasLimit uint64, deserCost types.UFraction) (*types.IBCBasicResult, uint64, error) {
-	return nil, 0, fmt.Errorf("IBCChannelClose not supported in wazero VM")
+	if err := vm.cache.IBCChannelClose(context.Background(), checksum, store, &goapi, &querier, gasMeter); err != nil {
+		return nil, 0, err
+	}
+	return &types.IBCBasicResult{}, 0, nil
 }
 
 func (vm *VM) IBCPacketReceive(checksum Checksum, env types.Env, msg types.IBCPacketReceiveMsg, store KVStore, goapi GoAPI, querier Querier, gasMeter GasMeter, gasLimit uint64, deserCost types.UFraction) (*types.IBCReceiveResult, uint64, error) {
-	return nil, 0, fmt.Errorf("IBCPacketReceive not supported in wazero VM")
+	if err := vm.cache.IBCPacketReceive(context.Background(), checksum, store, &goapi, &querier, gasMeter); err != nil {
+		return nil, 0, err
+	}
+	return &types.IBCReceiveResult{}, 0, nil
 }
 
 func (vm *VM) IBCPacketAck(checksum Checksum, env types.Env, msg types.IBCPacketAckMsg, store KVStore, goapi GoAPI, querier Querier, gasMeter GasMeter, gasLimit uint64, deserCost types.UFraction) (*types.IBCBasicResult, uint64, error) {
-	return nil, 0, fmt.Errorf("IBCPacketAck not supported in wazero VM")
+	if err := vm.cache.IBCPacketAck(context.Background(), checksum, store, &goapi, &querier, gasMeter); err != nil {
+		return nil, 0, err
+	}
+	return &types.IBCBasicResult{}, 0, nil
 }
 
 func (vm *VM) IBCPacketTimeout(checksum Checksum, env types.Env, msg types.IBCPacketTimeoutMsg, store KVStore, goapi GoAPI, querier Querier, gasMeter GasMeter, gasLimit uint64, deserCost types.UFraction) (*types.IBCBasicResult, uint64, error) {
-	return nil, 0, fmt.Errorf("IBCPacketTimeout not supported in wazero VM")
+	if err := vm.cache.IBCPacketTimeout(context.Background(), checksum, store, &goapi, &querier, gasMeter); err != nil {
+		return nil, 0, err
+	}
+	return &types.IBCBasicResult{}, 0, nil
 }
 
 func (vm *VM) IBCSourceCallback(checksum Checksum, env types.Env, msg types.IBCSourceCallbackMsg, store KVStore, goapi GoAPI, querier Querier, gasMeter GasMeter, gasLimit uint64, deserCost types.UFraction) (*types.IBCBasicResult, uint64, error) {
-	return nil, 0, fmt.Errorf("IBCSourceCallback not supported in wazero VM")
+	if err := vm.cache.IBCSourceCallback(context.Background(), checksum, store, &goapi, &querier, gasMeter); err != nil {
+		return nil, 0, err
+	}
+	return &types.IBCBasicResult{}, 0, nil
 }
 
 func (vm *VM) IBCDestinationCallback(checksum Checksum, env types.Env, msg types.IBCDestinationCallbackMsg, store KVStore, goapi GoAPI, querier Querier, gasMeter GasMeter, gasLimit uint64, deserCost types.UFraction) (*types.IBCBasicResult, uint64, error) {
-	return nil, 0, fmt.Errorf("IBCDestinationCallback not supported in wazero VM")
+	if err := vm.cache.IBCDestinationCallback(context.Background(), checksum, store, &goapi, &querier, gasMeter); err != nil {
+		return nil, 0, err
+	}
+	return &types.IBCBasicResult{}, 0, nil
 }
 
 func (vm *VM) IBC2PacketAck(checksum Checksum, env types.Env, msg types.IBC2AcknowledgeMsg, store KVStore, goapi GoAPI, querier Querier, gasMeter GasMeter, gasLimit uint64, deserCost types.UFraction) (*types.IBCBasicResult, uint64, error) {
-	return nil, 0, fmt.Errorf("IBC2PacketAck not supported in wazero VM")
+	if err := vm.cache.IBC2PacketAck(context.Background(), checksum, store, &goapi, &querier, gasMeter); err != nil {
+		return nil, 0, err
+	}
+	return &types.IBCBasicResult{}, 0, nil
 }
 
 func (vm *VM) IBC2PacketReceive(checksum Checksum, env types.Env, msg types.IBC2PacketReceiveMsg, store KVStore, goapi GoAPI, querier Querier, gasMeter GasMeter, gasLimit uint64, deserCost types.UFraction) (*types.IBCReceiveResult, uint64, error) {
-	return nil, 0, fmt.Errorf("IBC2PacketReceive not supported in wazero VM")
+	if err := vm.cache.IBC2PacketReceive(context.Background(), checksum, store, &goapi, &querier, gasMeter); err != nil {
+		return nil, 0, err
+	}
+	return &types.IBCReceiveResult{}, 0, nil
 }
 
 func (vm *VM) IBC2PacketTimeout(checksum Checksum, env types.Env, msg types.IBC2PacketTimeoutMsg, store KVStore, goapi GoAPI, querier Querier, gasMeter GasMeter, gasLimit uint64, deserCost types.UFraction) (*types.IBCBasicResult, uint64, error) {
-	return nil, 0, fmt.Errorf("IBC2PacketTimeout not supported in wazero VM")
+	if err := vm.cache.IBC2PacketTimeout(context.Background(), checksum, store, &goapi, &querier, gasMeter); err != nil {
+		return nil, 0, err
+	}
+	return &types.IBCBasicResult{}, 0, nil
 }
 
 func (vm *VM) IBC2PacketSend(checksum Checksum, env types.Env, msg types.IBC2PacketSendMsg, store KVStore, goapi GoAPI, querier Querier, gasMeter GasMeter, gasLimit uint64, deserCost types.UFraction) (*types.IBCBasicResult, uint64, error) {
-	return nil, 0, fmt.Errorf("IBC2PacketSend not supported in wazero VM")
+	if err := vm.cache.IBC2PacketSend(context.Background(), checksum, store, &goapi, &querier, gasMeter); err != nil {
+		return nil, 0, err
+	}
+	return &types.IBCBasicResult{}, 0, nil
 }

@@ -3,6 +3,7 @@ package wazeroimpl
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"runtime"
@@ -106,11 +107,70 @@ func (c *Cache) registerHost(ctx context.Context, store types.KVStore, apiImpl *
 		store.Delete(key)
 	}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("db_remove")
 
-	// query_external - simplified: returns 0 length
+	// query_external - calls into the Go querier
 	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
-		resPtr := uint32(stack[2])
-		_ = m.Memory().WriteUint32Le(resPtr, 0)
-	}), []api.ValueType{api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("query_external")
+		gasLimit := uint64(stack[0])
+		reqPtr := uint32(stack[1])
+		reqLen := uint32(stack[2])
+		outPtr := uint32(stack[3])
+		mem := m.Memory()
+		req, _ := mem.Read(reqPtr, reqLen)
+		if q != nil {
+			res := types.RustQuery(*q, req, gasLimit)
+			bz, _ := json.Marshal(res)
+			_ = mem.WriteUint32Le(outPtr, uint32(len(bz)))
+			mem.Write(outPtr+4, bz)
+		} else {
+			_ = mem.WriteUint32Le(outPtr, 0)
+		}
+	}), []api.ValueType{api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("query_external")
+
+	// humanize_address
+	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
+		srcPtr := uint32(stack[0])
+		srcLen := uint32(stack[1])
+		outPtr := uint32(stack[2])
+		mem := m.Memory()
+		addr, _ := mem.Read(srcPtr, srcLen)
+		if apiImpl != nil {
+			res, _, err := apiImpl.HumanizeAddress(addr)
+			if err == nil {
+				_ = mem.WriteUint32Le(outPtr, uint32(len(res)))
+				mem.Write(outPtr+4, []byte(res))
+				return
+			}
+		}
+		_ = mem.WriteUint32Le(outPtr, 0)
+	}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("humanize_address")
+
+	// canonicalize_address
+	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
+		srcPtr := uint32(stack[0])
+		srcLen := uint32(stack[1])
+		outPtr := uint32(stack[2])
+		mem := m.Memory()
+		addrBytes, _ := mem.Read(srcPtr, srcLen)
+		if apiImpl != nil {
+			res, _, err := apiImpl.CanonicalizeAddress(string(addrBytes))
+			if err == nil {
+				_ = mem.WriteUint32Le(outPtr, uint32(len(res)))
+				mem.Write(outPtr+4, res)
+				return
+			}
+		}
+		_ = mem.WriteUint32Le(outPtr, 0)
+	}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("canonicalize_address")
+
+	// validate_address
+	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
+		srcPtr := uint32(stack[0])
+		srcLen := uint32(stack[1])
+		mem := m.Memory()
+		addrBytes, _ := mem.Read(srcPtr, srcLen)
+		if apiImpl != nil {
+			_, _ = apiImpl.ValidateAddress(string(addrBytes))
+		}
+	}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("validate_address")
 
 	return builder.Instantiate(ctx)
 }
@@ -153,4 +213,88 @@ func (c *Cache) Execute(ctx context.Context, checksum types.Checksum, env, info,
 		_, err = fn.Call(ctx)
 	}
 	return err
+}
+
+// callFunc instantiates the module and executes the given exported function name.
+func (c *Cache) callFunc(ctx context.Context, checksum types.Checksum, funcName string, store types.KVStore, apiImpl *types.GoAPI, q *types.Querier, gm types.GasMeter) error {
+	compiled, ok := c.getModule(checksum)
+	if !ok {
+		return fmt.Errorf("module not found")
+	}
+	_, err := c.registerHost(ctx, store, apiImpl, q, gm)
+	if err != nil {
+		return err
+	}
+	mod, err := c.runtime.InstantiateModule(ctx, compiled, wazero.NewModuleConfig())
+	if err != nil {
+		return err
+	}
+	if fn := mod.ExportedFunction(funcName); fn != nil {
+		_, err = fn.Call(ctx)
+	}
+	return err
+}
+
+func (c *Cache) Query(ctx context.Context, checksum types.Checksum, store types.KVStore, apiImpl *types.GoAPI, q *types.Querier, gm types.GasMeter) error {
+	return c.callFunc(ctx, checksum, "query", store, apiImpl, q, gm)
+}
+
+func (c *Cache) Migrate(ctx context.Context, checksum types.Checksum, store types.KVStore, apiImpl *types.GoAPI, q *types.Querier, gm types.GasMeter) error {
+	return c.callFunc(ctx, checksum, "migrate", store, apiImpl, q, gm)
+}
+
+func (c *Cache) Sudo(ctx context.Context, checksum types.Checksum, store types.KVStore, apiImpl *types.GoAPI, q *types.Querier, gm types.GasMeter) error {
+	return c.callFunc(ctx, checksum, "sudo", store, apiImpl, q, gm)
+}
+
+func (c *Cache) Reply(ctx context.Context, checksum types.Checksum, store types.KVStore, apiImpl *types.GoAPI, q *types.Querier, gm types.GasMeter) error {
+	return c.callFunc(ctx, checksum, "reply", store, apiImpl, q, gm)
+}
+
+func (c *Cache) IBCChannelOpen(ctx context.Context, checksum types.Checksum, store types.KVStore, apiImpl *types.GoAPI, q *types.Querier, gm types.GasMeter) error {
+	return c.callFunc(ctx, checksum, "ibc_channel_open", store, apiImpl, q, gm)
+}
+
+func (c *Cache) IBCChannelConnect(ctx context.Context, checksum types.Checksum, store types.KVStore, apiImpl *types.GoAPI, q *types.Querier, gm types.GasMeter) error {
+	return c.callFunc(ctx, checksum, "ibc_channel_connect", store, apiImpl, q, gm)
+}
+
+func (c *Cache) IBCChannelClose(ctx context.Context, checksum types.Checksum, store types.KVStore, apiImpl *types.GoAPI, q *types.Querier, gm types.GasMeter) error {
+	return c.callFunc(ctx, checksum, "ibc_channel_close", store, apiImpl, q, gm)
+}
+
+func (c *Cache) IBCPacketReceive(ctx context.Context, checksum types.Checksum, store types.KVStore, apiImpl *types.GoAPI, q *types.Querier, gm types.GasMeter) error {
+	return c.callFunc(ctx, checksum, "ibc_packet_receive", store, apiImpl, q, gm)
+}
+
+func (c *Cache) IBCPacketAck(ctx context.Context, checksum types.Checksum, store types.KVStore, apiImpl *types.GoAPI, q *types.Querier, gm types.GasMeter) error {
+	return c.callFunc(ctx, checksum, "ibc_packet_ack", store, apiImpl, q, gm)
+}
+
+func (c *Cache) IBCPacketTimeout(ctx context.Context, checksum types.Checksum, store types.KVStore, apiImpl *types.GoAPI, q *types.Querier, gm types.GasMeter) error {
+	return c.callFunc(ctx, checksum, "ibc_packet_timeout", store, apiImpl, q, gm)
+}
+
+func (c *Cache) IBCSourceCallback(ctx context.Context, checksum types.Checksum, store types.KVStore, apiImpl *types.GoAPI, q *types.Querier, gm types.GasMeter) error {
+	return c.callFunc(ctx, checksum, "ibc_source_callback", store, apiImpl, q, gm)
+}
+
+func (c *Cache) IBCDestinationCallback(ctx context.Context, checksum types.Checksum, store types.KVStore, apiImpl *types.GoAPI, q *types.Querier, gm types.GasMeter) error {
+	return c.callFunc(ctx, checksum, "ibc_destination_callback", store, apiImpl, q, gm)
+}
+
+func (c *Cache) IBC2PacketReceive(ctx context.Context, checksum types.Checksum, store types.KVStore, apiImpl *types.GoAPI, q *types.Querier, gm types.GasMeter) error {
+	return c.callFunc(ctx, checksum, "ibc2_packet_receive", store, apiImpl, q, gm)
+}
+
+func (c *Cache) IBC2PacketAck(ctx context.Context, checksum types.Checksum, store types.KVStore, apiImpl *types.GoAPI, q *types.Querier, gm types.GasMeter) error {
+	return c.callFunc(ctx, checksum, "ibc2_packet_ack", store, apiImpl, q, gm)
+}
+
+func (c *Cache) IBC2PacketTimeout(ctx context.Context, checksum types.Checksum, store types.KVStore, apiImpl *types.GoAPI, q *types.Querier, gm types.GasMeter) error {
+	return c.callFunc(ctx, checksum, "ibc2_packet_timeout", store, apiImpl, q, gm)
+}
+
+func (c *Cache) IBC2PacketSend(ctx context.Context, checksum types.Checksum, store types.KVStore, apiImpl *types.GoAPI, q *types.Querier, gm types.GasMeter) error {
+	return c.callFunc(ctx, checksum, "ibc2_packet_send", store, apiImpl, q, gm)
 }
