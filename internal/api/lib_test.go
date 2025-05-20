@@ -66,8 +66,9 @@ func TestInitCacheWorksForNonExistentDir(t *testing.T) {
 func TestInitCacheErrorsForBrokenDir(t *testing.T) {
 	// Use colon to make this fail on Windows
 	// https://gist.github.com/doctaphred/d01d05291546186941e1b7ddc02034d3
-	// On Unix we should not have permission to create this.
-	cannotBeCreated := "/foo:bar"
+	// On Unix we should not have permission to create inside /sys
+	// which is mounted read-only in most environments.
+	cannotBeCreated := "/sys/foo:bar"
 	config := types.VMConfig{
 		Cache: types.CacheOptions{
 			BaseDir:                  cannotBeCreated,
