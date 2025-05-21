@@ -368,6 +368,20 @@ func (c *Cache) registerHost(ctx context.Context, compiled wazero.CompiledModule
 			store.Delete(key)
 		}), []api.ValueType{api.ValueTypeI32}, []api.ValueType{}).Export("db_remove")
 	}
+    // ---------------- DB SCAN ----------------
+    // Legacy Region-based scan: returns an empty result set
+    if pc, ok := expectedParams["db_scan"]; ok && pc == 1 {
+        builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
+            stack[0] = uint64(makeRegion(ctx, m, nil))
+        }), []api.ValueType{api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("db_scan")
+    }
+    // ---------------- DB NEXT ----------------
+    // Legacy Region-based iterator next: always end of iteration
+    if pc, ok := expectedParams["db_next"]; ok && pc == 1 {
+        builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
+            stack[0] = uint64(makeRegion(ctx, m, nil))
+        }), []api.ValueType{api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("db_next")
+    }
 
 	// --------- Address helpers (legacy Region ABI) ---------
 	if expectedParams["addr_validate"] == 1 {
