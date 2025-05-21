@@ -426,25 +426,31 @@ func (c *Cache) registerHost(ctx context.Context, compiled wazero.CompiledModule
 		}), []api.ValueType{api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("query_chain")
 	}
 
-	// secp256k1_verify, secp256k1_recover_pubkey, ed25519_verify, ed25519_batch_verify – stubs that return 0 (false)
-	stubVerify := func(name string, paramCount int) {
-		params := make([]api.ValueType, paramCount)
+	// crypto helpers – stubs that return false or no-op without dereferencing memory
+	for _, name := range []string{"secp256k1_verify", "ed25519_verify", "ed25519_batch_verify"} {
+		if pc, ok := expectedParams[name]; ok {
+			params := make([]api.ValueType, pc)
+			for i := range params {
+				params[i] = api.ValueTypeI32
+			}
+			builder.NewFunctionBuilder().
+				WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
+					stack[0] = 0
+				}), params, []api.ValueType{api.ValueTypeI32}).
+				Export(name)
+		}
+	}
+	if pc, ok := expectedParams["secp256k1_recover_pubkey"]; ok {
+		params := make([]api.ValueType, pc)
 		for i := range params {
 			params[i] = api.ValueTypeI32
 		}
-		builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
-			stack[0] = 0
-		}), params, []api.ValueType{api.ValueTypeI32}).Export(name)
+		builder.NewFunctionBuilder().
+			WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
+				stack[0] = 0
+			}), params, []api.ValueType{api.ValueTypeI64}).
+			Export("secp256k1_recover_pubkey")
 	}
-	// crypto helpers: we always register with legacy param counts (3) because the
-	// modern ABI kept param counts the same.
-	stubVerify("secp256k1_verify", 3)
-	// secp256k1_recover_pubkey returns i64 result instead of i32
-	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
-		stack[0] = 0
-	}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{api.ValueTypeI64}).Export("secp256k1_recover_pubkey")
-	stubVerify("ed25519_verify", 3)
-	stubVerify("ed25519_batch_verify", 3)
 
 	// query_external - simplified: returns 0 length
 	// canonicalize_address: input human string -> canonical bytes
