@@ -18,6 +18,38 @@ import (
 	"github.com/CosmWasm/wasmvm/v3/types"
 )
 
+// helper to read little-endian uint32 from guest memory safely.
+func memReadU32(mem api.Memory, ptr uint32) uint32 {
+    b, ok := mem.Read(ptr, 4)
+    if !ok {
+        return 0
+    }
+    return binary.LittleEndian.Uint32(b)
+}
+
+// readRegion interprets ptr as a *Region {offset, capacity, length} in guest
+// memory and returns (offset,length). If memory reads fail, (0,0) is returned.
+func readRegion(mem api.Memory, ptr uint32) (uint32, uint32) {
+    off := memReadU32(mem, ptr)
+    length := memReadU32(mem, ptr+8)
+    return off, length
+}
+
+// makeRegion copies data into guest memory via locateData and writes a Region
+// struct into guest memory, returning the pointer to that Region.
+func makeRegion(ctx context.Context, mod api.Module, data []byte) uint32 {
+    if len(data) == 0 {
+        return 0
+    }
+    off, length := locateData(ctx, mod, data)
+    regionBytes := make([]byte, 12)
+    binary.LittleEndian.PutUint32(regionBytes[0:], off)
+    binary.LittleEndian.PutUint32(regionBytes[4:], length) // capacity = length
+    binary.LittleEndian.PutUint32(regionBytes[8:], length)
+    regionPtr, _ := locateData(ctx, mod, regionBytes)
+    return regionPtr
+}
+
 // Cache manages a wazero runtime, compiled modules, and on-disk code storage.
 type Cache struct {
 	runtime wazero.Runtime
@@ -200,8 +232,21 @@ func (c *Cache) getModule(checksum types.Checksum) (wazero.CompiledModule, bool)
 }
 
 // registerHost builds an env module with callbacks for the given state.
-func (c *Cache) registerHost(ctx context.Context, store types.KVStore, apiImpl *types.GoAPI, q *types.Querier, gm types.GasMeter) (api.Module, error) {
+// registerHost builds an env module with callbacks. It inspects the compiled
+// module's import section and registers host functions with parameter/result
+// signatures that exactly match what the guest expects. This allows us to
+// support both the legacy (CosmWasm <1.0) and modern (ptr,len pairs) ABIs at
+// the same time.
+func (c *Cache) registerHost(ctx context.Context, compiled wazero.CompiledModule, store types.KVStore, apiImpl *types.GoAPI, q *types.Querier, gm types.GasMeter) (api.Module, error) {
 	builder := c.runtime.NewHostModuleBuilder("env")
+
+	// Map of function name to expected parameter count based on the guest module
+	expectedParams := make(map[string]int)
+	for _, f := range compiled.ImportedFunctions() {
+		if mod, name, imp := f.Import(); imp && mod == "env" {
+			expectedParams[name] = len(f.ParamTypes())
+		}
+	}
 	// ---------------------------------------------------------------------
 	// Helper functions required by CosmWasm contracts – **legacy** (v0.10-0.16)
 	// ABI. These minimal stubs are sufficient for the reflect.wasm contract to
@@ -229,73 +274,157 @@ func (c *Cache) registerHost(ctx context.Context, store types.KVStore, apiImpl *
 		panic(string(data))
 	}), []api.ValueType{api.ValueTypeI32}, []api.ValueType{}).Export("abort")
 
-	// db_read(key_ptr) -> i32 (data_ptr)
-	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
-		keyPtr := uint32(stack[0])
-		mem := m.Memory()
-		// length-prefixed key (4 byte little-endian length)
-		lenBytes, _ := mem.Read(keyPtr, 4)
-		keyLen := binary.LittleEndian.Uint32(lenBytes)
-		key, _ := mem.Read(keyPtr+4, keyLen)
-		val := store.Get(key)
-		if val == nil {
+	// ---------------- DB READ ----------------
+	if pc := expectedParams["db_read"]; pc == 3 {
+		// Modern ABI: (key_ptr, key_len, out_ptr)
+		builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
+			keyPtr := uint32(stack[0])
+			keyLen := uint32(stack[1])
+			outPtr := uint32(stack[2])
+			mem := m.Memory()
+			key, _ := mem.Read(keyPtr, keyLen)
+			//fmt.Println("db_read called len", len(key))
+			val := store.Get(key)
+			if val == nil {
+				_ = mem.WriteUint32Le(outPtr, 0)
+				return
+			}
+			_ = mem.WriteUint32Le(outPtr, uint32(len(val)))
+			mem.Write(outPtr+4, val)
+		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("db_read")
+	} else {
+		// Legacy ABI: (key_ptr) -> i32 (data_ptr)
+		builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
+			keyPtr := uint32(stack[0])
+			mem := m.Memory()
+		// legacy FFI: keyPtr is &Region{offset,capacity,length}
+		keyOff := memReadU32(mem, keyPtr)
+		keyLen := memReadU32(mem, keyPtr+8)
+		key, _ := mem.Read(keyOff, keyLen)
+			val := store.Get(key)
+			if val == nil {
+				stack[0] = 0
+				return
+			}
+			// Allocate data bytes first
+			dataPtr, dataLen := locateData(ctx, m, val)
+			// Build Region struct {offset,capacity,length}
+			region := make([]byte, 12)
+			binary.LittleEndian.PutUint32(region[0:], dataPtr)
+			binary.LittleEndian.PutUint32(region[4:], dataLen)
+			binary.LittleEndian.PutUint32(region[8:], dataLen)
+			regPtr, _ := locateData(ctx, m, region)
+			stack[0] = uint64(regPtr)
+		}), []api.ValueType{api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("db_read")
+	}
+
+	// ---------------- DB WRITE ----------------
+	if pc := expectedParams["db_write"]; pc == 4 {
+		// Modern: (key_ptr,key_len,val_ptr,val_len)
+		builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
+			keyPtr := uint32(stack[0])
+			keyLen := uint32(stack[1])
+			valPtr := uint32(stack[2])
+			valLen := uint32(stack[3])
+			mem := m.Memory()
+			key, _ := mem.Read(keyPtr, keyLen)
+			val, _ := mem.Read(valPtr, valLen)
+			store.Set(key, val)
+		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("db_write")
+	} else {
+		// Legacy: (key_ptr, val_ptr)
+		builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
+			keyPtr := uint32(stack[0])
+			valPtr := uint32(stack[1])
+			mem := m.Memory()
+			kOff := memReadU32(mem, keyPtr)
+			kLen := memReadU32(mem, keyPtr+8)
+			key, _ := mem.Read(kOff, kLen)
+			vOff := memReadU32(mem, valPtr)
+			vLen := memReadU32(mem, valPtr+8)
+			val, _ := mem.Read(vOff, vLen)
+            _ = key
+            _ = val
+			store.Set(key, val)
+		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("db_write")
+	}
+
+	// ---------------- DB REMOVE ----------------
+	if pc := expectedParams["db_remove"]; pc == 2 {
+		builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
+			keyPtr := uint32(stack[0])
+			keyLen := uint32(stack[1])
+			mem := m.Memory()
+			key, _ := mem.Read(keyPtr, keyLen)
+			store.Delete(key)
+		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("db_remove")
+	} else {
+		builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
+			keyPtr := uint32(stack[0])
+			mem := m.Memory()
+			kOff := memReadU32(mem, keyPtr)
+			kLen := memReadU32(mem, keyPtr+8)
+			key, _ := mem.Read(kOff, kLen)
+			store.Delete(key)
+		}), []api.ValueType{api.ValueTypeI32}, []api.ValueType{}).Export("db_remove")
+	}
+
+	// --------- Address helpers (legacy Region ABI) ---------
+	if expectedParams["addr_validate"] == 1 {
+		builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
+			ptr := uint32(stack[0])
+			mem := m.Memory()
+			off, length := readRegion(mem, ptr)
+			_ , _ = off, length
+			stack[0] = 0 // success
+		}), []api.ValueType{api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("addr_validate")
+	}
+
+	if expectedParams["addr_canonicalize"] == 2 {
+		builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
+			humanPtr := uint32(stack[0])
+			outPtr := uint32(stack[1])
+			mem := m.Memory()
+			hOff, hLen := readRegion(mem, humanPtr)
+			human, _ := mem.Read(hOff, hLen)
+			_ = human
+			// dummy canonical: just lower-case normally; we'll return same bytes
+			canonical := human
+			dataOff, dataLen := locateData(ctx, m, canonical)
+			_ = mem.WriteUint32Le(outPtr, dataOff)
+			_ = mem.WriteUint32Le(outPtr+4, dataLen)
+			_ = mem.WriteUint32Le(outPtr+8, dataLen)
 			stack[0] = 0
-			return
-		}
-		buf := make([]byte, 4+len(val))
-		binary.LittleEndian.PutUint32(buf, uint32(len(val)))
-		copy(buf[4:], val)
-		ptr, _ := locateData(ctx, m, buf)
-		stack[0] = uint64(ptr)
-	}), []api.ValueType{api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("db_read")
+		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("addr_canonicalize")
+	}
 
-	// db_write(key_ptr, value_ptr)
-	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
-		keyPtr := uint32(stack[0])
-		valPtr := uint32(stack[1])
-		mem := m.Memory()
-		// length-prefixed key
-		lenB, _ := mem.Read(keyPtr, 4)
-		keyLen := binary.LittleEndian.Uint32(lenB)
-		key, _ := mem.Read(keyPtr+4, keyLen)
-		// length-prefixed value
-		valLenB, _ := mem.Read(valPtr, 4)
-		valLen := binary.LittleEndian.Uint32(valLenB)
-		val, _ := mem.Read(valPtr+4, valLen)
-		store.Set(key, val)
-	}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("db_write")
+	if expectedParams["addr_humanize"] == 2 {
+		builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
+			canonPtr := uint32(stack[0])
+			outPtr := uint32(stack[1])
+			mem := m.Memory()
+			off, l := readRegion(mem, canonPtr)
+			canonical, _ := mem.Read(off, l)
+			human := canonical
+			dataOff, dataLen := locateData(ctx, m, human)
+			_ = mem.WriteUint32Le(outPtr, dataOff)
+			_ = mem.WriteUint32Le(outPtr+4, dataLen)
+			_ = mem.WriteUint32Le(outPtr+8, dataLen)
+			stack[0] = 0
+		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("addr_humanize")
+	}
 
-	// db_remove(key_ptr)
-	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
-		keyPtr := uint32(stack[0])
-		mem := m.Memory()
-		lenB, _ := mem.Read(keyPtr, 4)
-		keyLen := binary.LittleEndian.Uint32(lenB)
-		key, _ := mem.Read(keyPtr+4, keyLen)
-		store.Delete(key)
-	}), []api.ValueType{api.ValueTypeI32}, []api.ValueType{}).Export("db_remove")
-
-	// addr_validate(human_ptr) -> i32 (0 = valid)
-	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
-		// we consider all addresses valid in stub; return 0
-		stack[0] = 0
-	}), []api.ValueType{api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("addr_validate")
-
-	// addr_canonicalize(human_ptr, out_ptr) -> i32 (0 = OK)
-	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
-		stack[0] = 0
-	}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("addr_canonicalize")
-
-	// addr_humanize(canonical_ptr, out_ptr) -> i32 (0 = OK)
-	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
-		stack[0] = 0
-	}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("addr_humanize")
-
-	// query_chain(request_ptr) -> i32 (response_ptr)
-	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
-		// not implemented: return 0 meaning empty response
-		stack[0] = 0
-	}), []api.ValueType{api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("query_chain")
+	if expectedParams["query_chain"] == 1 {
+		builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
+			reqPtr := uint32(stack[0])
+			mem := m.Memory()
+			off, l := readRegion(mem, reqPtr)
+			reqData, _ := mem.Read(off, l)
+			_ = reqData // ignore
+			// empty response region
+			stack[0] = uint64(makeRegion(ctx, m, nil))
+		}), []api.ValueType{api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("query_chain")
+	}
 
 	// secp256k1_verify, secp256k1_recover_pubkey, ed25519_verify, ed25519_batch_verify – stubs that return 0 (false)
 	stubVerify := func(name string, paramCount int) {
@@ -307,15 +436,13 @@ func (c *Cache) registerHost(ctx context.Context, store types.KVStore, apiImpl *
 			stack[0] = 0
 		}), params, []api.ValueType{api.ValueTypeI32}).Export(name)
 	}
+	// crypto helpers: we always register with legacy param counts (3) because the
+	// modern ABI kept param counts the same.
 	stubVerify("secp256k1_verify", 3)
-	// secp256k1_recover_pubkey returns ptr (i64 in legacy ABI)
+	// secp256k1_recover_pubkey returns i64 result instead of i32
 	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
 		stack[0] = 0
 	}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{api.ValueTypeI64}).Export("secp256k1_recover_pubkey")
-
-	stubVerify("secp256k1_verify", 3)
-	stubVerify("ed25519_verify", 3)
-	stubVerify("ed25519_batch_verify", 3)
 	stubVerify("ed25519_verify", 3)
 	stubVerify("ed25519_batch_verify", 3)
 
@@ -402,7 +529,7 @@ func (c *Cache) Instantiate(ctx context.Context, checksum types.Checksum, env, i
 	if !ok {
 		return fmt.Errorf("module not found")
 	}
-	_, err := c.registerHost(ctx, store, apiImpl, q, gm)
+	_, err := c.registerHost(ctx, compiled, store, apiImpl, q, gm)
 	if err != nil {
 		return err
 	}
@@ -453,7 +580,7 @@ func (c *Cache) Execute(ctx context.Context, checksum types.Checksum, env, info,
 	if !ok {
 		return fmt.Errorf("module not found")
 	}
-	_, err := c.registerHost(ctx, store, apiImpl, q, gm)
+	_, err := c.registerHost(ctx, compiled, store, apiImpl, q, gm)
 	if err != nil {
 		return err
 	}

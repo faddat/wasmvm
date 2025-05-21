@@ -51,7 +51,7 @@ func TestLocateData(t *testing.T) {
 
     // Provide a fresh in-memory store.
     store := memStore{}
-    if _, err := cache.registerHost(ctx, store, &types.GoAPI{}, (*types.Querier)(nil), types.GasMeter(nil)); err != nil {
+    if _, err := cache.registerHost(ctx, compiled, store, &types.GoAPI{}, (*types.Querier)(nil), types.GasMeter(nil)); err != nil {
         t.Fatalf("register host: %v", err)
     }
 
@@ -81,3 +81,28 @@ func TestLocateData(t *testing.T) {
 func TestInstantiateExecuteSmoke(t *testing.T) {
     t.Skip("full Instantiate/Execute smoke test requires complete host ABI; skipped for minimal harness")
  }
+
+// TestHackatomInstantiate ensures that a modern CosmWasm 1.x contract (hackatom)
+// can at least be instantiated with the modern ptr/len host ABI we generate.
+func TestHackatomInstantiate(t *testing.T) {
+    wasmBytes, err := os.ReadFile("../../testdata/hackatom.wasm")
+    if err != nil {
+        t.Skip("hackatom.wasm not present – skipping modern ABI test")
+    }
+
+    cfg := types.VMConfig{Cache: types.CacheOptions{InstanceMemoryLimitBytes: types.NewSizeMebi(32)}}
+    cache, err := InitCache(cfg)
+    if err != nil {
+        t.Fatalf("init cache: %v", err)
+    }
+    defer cache.Close(context.Background())
+
+    checksum := types.Checksum{7,7,7}
+    if err := cache.Compile(context.Background(), checksum, wasmBytes); err != nil {
+        t.Fatalf("compile: %v", err)
+    }
+
+    if err := cache.Instantiate(context.Background(), checksum, []byte("{}"), []byte("{}"), []byte("{}"), memStore{}, &types.GoAPI{}, nil, nil); err != nil {
+        t.Fatalf("instantiate modern ABI failed: %v", err)
+    }
+}
