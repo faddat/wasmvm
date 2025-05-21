@@ -20,34 +20,34 @@ import (
 
 // helper to read little-endian uint32 from guest memory safely.
 func memReadU32(mem api.Memory, ptr uint32) uint32 {
-    b, ok := mem.Read(ptr, 4)
-    if !ok {
-        return 0
-    }
-    return binary.LittleEndian.Uint32(b)
+	b, ok := mem.Read(ptr, 4)
+	if !ok {
+		return 0
+	}
+	return binary.LittleEndian.Uint32(b)
 }
 
 // readRegion interprets ptr as a *Region {offset, capacity, length} in guest
 // memory and returns (offset,length). If memory reads fail, (0,0) is returned.
 func readRegion(mem api.Memory, ptr uint32) (uint32, uint32) {
-    off := memReadU32(mem, ptr)
-    length := memReadU32(mem, ptr+8)
-    return off, length
+	off := memReadU32(mem, ptr)
+	length := memReadU32(mem, ptr+8)
+	return off, length
 }
 
 // makeRegion copies data into guest memory via locateData and writes a Region
 // struct into guest memory, returning the pointer to that Region.
 func makeRegion(ctx context.Context, mod api.Module, data []byte) uint32 {
-    if len(data) == 0 {
-        return 0
-    }
-    off, length := locateData(ctx, mod, data)
-    regionBytes := make([]byte, 12)
-    binary.LittleEndian.PutUint32(regionBytes[0:], off)
-    binary.LittleEndian.PutUint32(regionBytes[4:], length) // capacity = length
-    binary.LittleEndian.PutUint32(regionBytes[8:], length)
-    regionPtr, _ := locateData(ctx, mod, regionBytes)
-    return regionPtr
+	if len(data) == 0 {
+		return 0
+	}
+	off, length := locateData(ctx, mod, data)
+	regionBytes := make([]byte, 12)
+	binary.LittleEndian.PutUint32(regionBytes[0:], off)
+	binary.LittleEndian.PutUint32(regionBytes[4:], length) // capacity = length
+	binary.LittleEndian.PutUint32(regionBytes[8:], length)
+	regionPtr, _ := locateData(ctx, mod, regionBytes)
+	return regionPtr
 }
 
 // Cache manages a wazero runtime, compiled modules, and on-disk code storage.
@@ -283,7 +283,7 @@ func (c *Cache) registerHost(ctx context.Context, compiled wazero.CompiledModule
 			outPtr := uint32(stack[2])
 			mem := m.Memory()
 			key, _ := mem.Read(keyPtr, keyLen)
-			//fmt.Println("db_read called len", len(key))
+			// fmt.Println("db_read called len", len(key))
 			val := store.Get(key)
 			if val == nil {
 				_ = mem.WriteUint32Le(outPtr, 0)
@@ -297,10 +297,10 @@ func (c *Cache) registerHost(ctx context.Context, compiled wazero.CompiledModule
 		builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
 			keyPtr := uint32(stack[0])
 			mem := m.Memory()
-		// legacy FFI: keyPtr is &Region{offset,capacity,length}
-		keyOff := memReadU32(mem, keyPtr)
-		keyLen := memReadU32(mem, keyPtr+8)
-		key, _ := mem.Read(keyOff, keyLen)
+			// legacy FFI: keyPtr is &Region{offset,capacity,length}
+			keyOff := memReadU32(mem, keyPtr)
+			keyLen := memReadU32(mem, keyPtr+8)
+			key, _ := mem.Read(keyOff, keyLen)
 			val := store.Get(key)
 			if val == nil {
 				stack[0] = 0
@@ -343,8 +343,8 @@ func (c *Cache) registerHost(ctx context.Context, compiled wazero.CompiledModule
 			vOff := memReadU32(mem, valPtr)
 			vLen := memReadU32(mem, valPtr+8)
 			val, _ := mem.Read(vOff, vLen)
-            _ = key
-            _ = val
+			_ = key
+			_ = val
 			store.Set(key, val)
 		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("db_write")
 	}
@@ -375,7 +375,7 @@ func (c *Cache) registerHost(ctx context.Context, compiled wazero.CompiledModule
 			ptr := uint32(stack[0])
 			mem := m.Memory()
 			off, length := readRegion(mem, ptr)
-			_ , _ = off, length
+			_, _ = off, length
 			stack[0] = 0 // success
 		}), []api.ValueType{api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("addr_validate")
 	}
@@ -539,7 +539,8 @@ func (c *Cache) Instantiate(ctx context.Context, checksum types.Checksum, env, i
 	}
 	if fn := mod.ExportedFunction("instantiate"); fn != nil {
 		paramCount := len(fn.Definition().ParamTypes())
-		if paramCount == 6 {
+		switch paramCount {
+		case 6:
 			// CosmWasm v1+ ABI (ptr,len pairs)
 			envPtr, envLen := uint32(0), uint32(0)
 			infoPtr, infoLen := uint32(0), uint32(0)
@@ -554,7 +555,7 @@ func (c *Cache) Instantiate(ctx context.Context, checksum types.Checksum, env, i
 				msgPtr, msgLen = locateData(ctx, mod, msg)
 			}
 			_, err = fn.Call(ctx, uint64(envPtr), uint64(envLen), uint64(infoPtr), uint64(infoLen), uint64(msgPtr), uint64(msgLen))
-		} else if paramCount == 3 {
+		case 3:
 			// Legacy ABI: env_ptr, info_ptr, msg_ptr (each data = len|bytes)
 			wrap := func(b []byte) []byte {
 				buf := make([]byte, 4+len(b))
@@ -566,7 +567,7 @@ func (c *Cache) Instantiate(ctx context.Context, checksum types.Checksum, env, i
 			infoPtr, _ := locateData(ctx, mod, wrap(info))
 			msgPtr, _ := locateData(ctx, mod, wrap(msg))
 			_, err = fn.Call(ctx, uint64(envPtr), uint64(infoPtr), uint64(msgPtr))
-		} else {
+		default:
 			err = fmt.Errorf("unsupported instantiate param count %d", paramCount)
 		}
 	}
@@ -590,7 +591,8 @@ func (c *Cache) Execute(ctx context.Context, checksum types.Checksum, env, info,
 	}
 	if fn := mod.ExportedFunction("execute"); fn != nil {
 		paramCount := len(fn.Definition().ParamTypes())
-		if paramCount == 6 {
+		switch paramCount {
+		case 6:
 			envPtr, envLen := uint32(0), uint32(0)
 			infoPtr, infoLen := uint32(0), uint32(0)
 			msgPtr, msgLen := uint32(0), uint32(0)
@@ -604,7 +606,7 @@ func (c *Cache) Execute(ctx context.Context, checksum types.Checksum, env, info,
 				msgPtr, msgLen = locateData(ctx, mod, msg)
 			}
 			_, err = fn.Call(ctx, uint64(envPtr), uint64(envLen), uint64(infoPtr), uint64(infoLen), uint64(msgPtr), uint64(msgLen))
-		} else if paramCount == 3 {
+		case 3:
 			wrap := func(b []byte) []byte {
 				buf := make([]byte, 4+len(b))
 				binary.LittleEndian.PutUint32(buf, uint32(len(b)))
@@ -615,7 +617,7 @@ func (c *Cache) Execute(ctx context.Context, checksum types.Checksum, env, info,
 			infoPtr, _ := locateData(ctx, mod, wrap(info))
 			msgPtr, _ := locateData(ctx, mod, wrap(msg))
 			_, err = fn.Call(ctx, uint64(envPtr), uint64(infoPtr), uint64(msgPtr))
-		} else {
+		default:
 			err = fmt.Errorf("unsupported execute param count %d", paramCount)
 		}
 	}
