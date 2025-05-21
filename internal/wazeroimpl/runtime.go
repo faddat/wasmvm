@@ -457,8 +457,13 @@ func (c *Cache) registerHost(ctx context.Context, compiled wazero.CompiledModule
 			reqPtr := uint32(stack[0])
 			reqLen := uint32(stack[1])
 			reqData, _ := mem.Read(reqPtr, reqLen)
-			// perform query
-			qr := types.RustQuery(*q, reqData, 0)
+			// determine per-query gas limit if provided
+			var gasLimit uint64
+			if pc >= 3 {
+				gasLimit = stack[2]
+			}
+			// perform query with guest-specified gas limit
+			qr := types.RustQuery(*q, reqData, gasLimit)
 			outBytes, _ := json.Marshal(qr)
 			if rc == 1 {
 				regionPtr := makeRegion(ctx, m, outBytes)
