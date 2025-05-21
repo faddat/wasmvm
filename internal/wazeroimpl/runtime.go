@@ -2,9 +2,9 @@ package wazeroimpl
 
 import (
 	"context"
-   "encoding/binary"
-   "encoding/hex"
-   "encoding/json"
+	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -241,15 +241,15 @@ func (c *Cache) getModule(checksum types.Checksum) (wazero.CompiledModule, bool)
 func (c *Cache) registerHost(ctx context.Context, compiled wazero.CompiledModule, store types.KVStore, apiImpl *types.GoAPI, q *types.Querier, gm types.GasMeter) (api.Module, error) {
 	builder := c.runtime.NewHostModuleBuilder("env")
 
-   // Map of function name to expected parameter and result counts based on the guest module
-  expectedParams := make(map[string]int)
-  expectedResults := make(map[string]int)
-  for _, f := range compiled.ImportedFunctions() {
-    if mod, name, imp := f.Import(); imp && mod == "env" {
-      expectedParams[name] = len(f.ParamTypes())
-      expectedResults[name] = len(f.ResultTypes())
-    }
-  }
+	// Map of function name to expected parameter and result counts based on the guest module
+	expectedParams := make(map[string]int)
+	expectedResults := make(map[string]int)
+	for _, f := range compiled.ImportedFunctions() {
+		if mod, name, imp := f.Import(); imp && mod == "env" {
+			expectedParams[name] = len(f.ParamTypes())
+			expectedResults[name] = len(f.ResultTypes())
+		}
+	}
 	// ---------------------------------------------------------------------
 	// Helper functions required by CosmWasm contracts – **legacy** (v0.10-0.16)
 	// ABI. These minimal stubs are sufficient for the reflect.wasm contract to
@@ -371,20 +371,20 @@ func (c *Cache) registerHost(ctx context.Context, compiled wazero.CompiledModule
 			store.Delete(key)
 		}), []api.ValueType{api.ValueTypeI32}, []api.ValueType{}).Export("db_remove")
 	}
-    // ---------------- DB SCAN ----------------
-    // Legacy Region-based scan: returns an empty result set
-    if pc, ok := expectedParams["db_scan"]; ok && pc == 1 {
-        builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
-            stack[0] = uint64(makeRegion(ctx, m, nil))
-        }), []api.ValueType{api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("db_scan")
-    }
-    // ---------------- DB NEXT ----------------
-    // Legacy Region-based iterator next: always end of iteration
-    if pc, ok := expectedParams["db_next"]; ok && pc == 1 {
-        builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
-            stack[0] = uint64(makeRegion(ctx, m, nil))
-        }), []api.ValueType{api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("db_next")
-    }
+	// ---------------- DB SCAN ----------------
+	// Legacy Region-based scan: returns an empty result set
+	if pc, ok := expectedParams["db_scan"]; ok && pc == 1 {
+		builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
+			stack[0] = uint64(makeRegion(ctx, m, nil))
+		}), []api.ValueType{api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("db_scan")
+	}
+	// ---------------- DB NEXT ----------------
+	// Legacy Region-based iterator next: always end of iteration
+	if pc, ok := expectedParams["db_next"]; ok && pc == 1 {
+		builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
+			stack[0] = uint64(makeRegion(ctx, m, nil))
+		}), []api.ValueType{api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("db_next")
+	}
 
 	// --------- Address helpers (legacy Region ABI) ---------
 	if expectedParams["addr_validate"] == 1 {
@@ -431,74 +431,74 @@ func (c *Cache) registerHost(ctx context.Context, compiled wazero.CompiledModule
 		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("addr_humanize")
 	}
 
-  if expectedParams["query_chain"] == 1 {
-    builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
-      reqPtr := uint32(stack[0])
-      mem := m.Memory()
-      off, l := readRegion(mem, reqPtr)
-      _, _ = mem.Read(off, l)
-      // empty response region
-      stack[0] = uint64(makeRegion(ctx, m, nil))
-    }), []api.ValueType{api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("query_chain")
-  }
-  // Modern query host: support (ptr,len)->region or (ptr,len,out_ptr)->void
-  if pc, ok := expectedParams["query"]; ok {
-    rc := expectedResults["query"]
-    params := make([]api.ValueType, pc)
-    for i := range params {
-      params[i] = api.ValueTypeI32
-    }
-    results := make([]api.ValueType, rc)
-    for i := range results {
-      results[i] = api.ValueTypeI32
-    }
-    builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
-      mem := m.Memory()
-      reqPtr := uint32(stack[0])
-      reqLen := uint32(stack[1])
-      reqData, _ := mem.Read(reqPtr, reqLen)
-      // perform query
-      qr := types.RustQuery(*q, reqData, 0)
-      outBytes, _ := json.Marshal(qr)
-      if rc == 1 {
-        regionPtr := makeRegion(ctx, m, outBytes)
-        stack[0] = uint64(regionPtr)
-      } else if pc >= 3 {
-        outPtr := uint32(stack[2])
-        off, length := locateData(ctx, m, outBytes)
-        mem.WriteUint32Le(outPtr, off)
-        mem.WriteUint32Le(outPtr+4, length)
-        mem.WriteUint32Le(outPtr+8, length)
-      }
-    }), params, results).Export("query")
-  }
-  // Modern call host: stub no-op for contract-to-contract calls
-  for _, name := range []string{"call", "call_contract"} {
-    if pc, ok := expectedParams[name]; ok {
-      rc := expectedResults[name]
-      params := make([]api.ValueType, pc)
-      for i := range params {
-        params[i] = api.ValueTypeI32
-      }
-      results := make([]api.ValueType, rc)
-      for i := range results {
-        results[i] = api.ValueTypeI32
-      }
-      builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
-        if rc == 1 {
-          // return empty region
-          stack[0] = uint64(makeRegion(ctx, m, nil))
-        } else if pc >= 3 {
-          // write empty region to outPtr
-          outPtr := uint32(stack[2])
-          mem := m.Memory()
-          mem.WriteUint32Le(outPtr, 0)
-          mem.WriteUint32Le(outPtr+4, 0)
-          mem.WriteUint32Le(outPtr+8, 0)
-        }
-      }), params, results).Export(name)
-    }
-  }
+	if expectedParams["query_chain"] == 1 {
+		builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
+			reqPtr := uint32(stack[0])
+			mem := m.Memory()
+			off, l := readRegion(mem, reqPtr)
+			_, _ = mem.Read(off, l)
+			// empty response region
+			stack[0] = uint64(makeRegion(ctx, m, nil))
+		}), []api.ValueType{api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("query_chain")
+	}
+	// Modern query host: support (ptr,len)->region or (ptr,len,out_ptr)->void
+	if pc, ok := expectedParams["query"]; ok {
+		rc := expectedResults["query"]
+		params := make([]api.ValueType, pc)
+		for i := range params {
+			params[i] = api.ValueTypeI32
+		}
+		results := make([]api.ValueType, rc)
+		for i := range results {
+			results[i] = api.ValueTypeI32
+		}
+		builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
+			mem := m.Memory()
+			reqPtr := uint32(stack[0])
+			reqLen := uint32(stack[1])
+			reqData, _ := mem.Read(reqPtr, reqLen)
+			// perform query
+			qr := types.RustQuery(*q, reqData, 0)
+			outBytes, _ := json.Marshal(qr)
+			if rc == 1 {
+				regionPtr := makeRegion(ctx, m, outBytes)
+				stack[0] = uint64(regionPtr)
+			} else if pc >= 3 {
+				outPtr := uint32(stack[2])
+				off, length := locateData(ctx, m, outBytes)
+				mem.WriteUint32Le(outPtr, off)
+				mem.WriteUint32Le(outPtr+4, length)
+				mem.WriteUint32Le(outPtr+8, length)
+			}
+		}), params, results).Export("query")
+	}
+	// Modern call host: stub no-op for contract-to-contract calls
+	for _, name := range []string{"call", "call_contract"} {
+		if pc, ok := expectedParams[name]; ok {
+			rc := expectedResults[name]
+			params := make([]api.ValueType, pc)
+			for i := range params {
+				params[i] = api.ValueTypeI32
+			}
+			results := make([]api.ValueType, rc)
+			for i := range results {
+				results[i] = api.ValueTypeI32
+			}
+			builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
+				if rc == 1 {
+					// return empty region
+					stack[0] = uint64(makeRegion(ctx, m, nil))
+				} else if pc >= 3 {
+					// write empty region to outPtr
+					outPtr := uint32(stack[2])
+					mem := m.Memory()
+					mem.WriteUint32Le(outPtr, 0)
+					mem.WriteUint32Le(outPtr+4, 0)
+					mem.WriteUint32Le(outPtr+8, 0)
+				}
+			}), params, results).Export(name)
+		}
+	}
 
 	// crypto helpers – stubs that return false or no-op without dereferencing memory
 	for _, name := range []string{"secp256k1_verify", "ed25519_verify", "ed25519_batch_verify"} {
