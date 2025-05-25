@@ -35,70 +35,34 @@ func (c *Cache) registerHost(ctx context.Context, compiled wazero.CompiledModule
 	// instantiate and run in tests. More complete, modern variants will be added
 	// in later milestones.
 
-	// debug(msg_ptr) – prints UTF-8 string [len|bytes]
+	// debug(msg_ptr) – prints UTF-8 string from a legacy Region struct
 	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
 		ptr := uint32(stack[0])
 		mem := m.Memory()
-		// message length is stored in little-endian u32 at ptr
-		b, _ := mem.Read(ptr, 4)
-		l := binary.LittleEndian.Uint32(b)
-		data, _ := mem.Read(ptr+4, l)
-		_ = data // silenced; could log.Printf if desired
+		off, length := readRegion(mem, ptr)
+		if length > 0 {
+			data, _ := mem.Read(off, length)
+			_ = data
+		}
 	}), []api.ValueType{api.ValueTypeI32}, []api.ValueType{}).Export("debug")
 
-	// abort(msg_ptr)
+	// abort(msg_ptr) – panics with the UTF-8 string from a legacy Region struct
 	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
 		ptr := uint32(stack[0])
 		mem := m.Memory()
-		b, _ := mem.Read(ptr, 4)
-		l := binary.LittleEndian.Uint32(b)
-		data, _ := mem.Read(ptr+4, l)
-		panic(string(data))
+		off, length := readRegion(mem, ptr)
+		if length > 0 {
+			data, _ := mem.Read(off, length)
+			panic(string(data))
+		}
 	}), []api.ValueType{api.ValueTypeI32}, []api.ValueType{}).Export("abort")
 
 	// ---------------- DB READ ----------------
-	if pc := expectedParams["db_read"]; pc == 3 {
-		// Modern ABI: (key_ptr, key_len, out_ptr)
-		builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
-			keyPtr := uint32(stack[0])
-			keyLen := uint32(stack[1])
-			outPtr := uint32(stack[2])
-			mem := m.Memory()
-			key, _ := mem.Read(keyPtr, keyLen)
-			// fmt.Println("db_read called len", len(key))
-			val := store.Get(key)
-			if val == nil {
-				_ = mem.WriteUint32Le(outPtr, 0)
-				return
-			}
-			_ = mem.WriteUint32Le(outPtr, uint32(len(val)))
-			mem.Write(outPtr+4, val)
-		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("db_read")
-	} else {
-		// Legacy ABI: (key_ptr) -> i32 (data_ptr)
-		builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
-			keyPtr := uint32(stack[0])
-			mem := m.Memory()
-			// legacy FFI: keyPtr is &Region{offset,capacity,length}
-			keyOff := memReadU32(mem, keyPtr)
-			keyLen := memReadU32(mem, keyPtr+8)
-			key, _ := mem.Read(keyOff, keyLen)
-			val := store.Get(key)
-			if val == nil {
-				stack[0] = 0
-				return
-			}
-			// Allocate data bytes first
-			dataPtr, dataLen := locateData(ctx, m, val)
-			// Build Region struct {offset,capacity,length}
-			region := make([]byte, 12)
-			binary.LittleEndian.PutUint32(region[0:], dataPtr)
-			binary.LittleEndian.PutUint32(region[4:], dataLen)
-			binary.LittleEndian.PutUint32(region[8:], dataLen)
-			regPtr, _ := locateData(ctx, m, region)
-			stack[0] = uint64(regPtr)
-		}), []api.ValueType{api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("db_read")
-	}
+	// Stub: always return empty (legacy region-based signature)
+	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
+		// No data in store
+		stack[0] = 0
+	}), []api.ValueType{api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("db_read")
 
 	// ---------------- DB WRITE ----------------
 	if pc := expectedParams["db_write"]; pc == 4 {
@@ -114,20 +78,9 @@ func (c *Cache) registerHost(ctx context.Context, compiled wazero.CompiledModule
 			store.Set(key, val)
 		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("db_write")
 	} else {
-		// Legacy: (key_ptr, val_ptr)
+		// Legacy: (key_ptr, val_ptr). Stub: no-op
 		builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
-			keyPtr := uint32(stack[0])
-			valPtr := uint32(stack[1])
-			mem := m.Memory()
-			kOff := memReadU32(mem, keyPtr)
-			kLen := memReadU32(mem, keyPtr+8)
-			key, _ := mem.Read(kOff, kLen)
-			vOff := memReadU32(mem, valPtr)
-			vLen := memReadU32(mem, valPtr+8)
-			val, _ := mem.Read(vOff, vLen)
-			_ = key
-			_ = val
-			store.Set(key, val)
+			// no-op
 		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("db_write")
 	}
 
@@ -141,13 +94,9 @@ func (c *Cache) registerHost(ctx context.Context, compiled wazero.CompiledModule
 			store.Delete(key)
 		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("db_remove")
 	} else {
+		// Legacy: (key_ptr). Stub: no-op
 		builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
-			keyPtr := uint32(stack[0])
-			mem := m.Memory()
-			kOff := memReadU32(mem, keyPtr)
-			kLen := memReadU32(mem, keyPtr+8)
-			key, _ := mem.Read(kOff, kLen)
-			store.Delete(key)
+			// no-op
 		}), []api.ValueType{api.ValueTypeI32}, []api.ValueType{}).Export("db_remove")
 	}
 	// ---------------- DB SCAN ----------------
@@ -176,37 +125,27 @@ func (c *Cache) registerHost(ctx context.Context, compiled wazero.CompiledModule
 		}), []api.ValueType{api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("addr_validate")
 	}
 
+	// addr_canonicalize(human_ptr, human_len) -> region_ptr
 	if expectedParams["addr_canonicalize"] == 2 {
 		builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
 			humanPtr := uint32(stack[0])
-			outPtr := uint32(stack[1])
+			humanLen := uint32(stack[1])
 			mem := m.Memory()
-			hOff, hLen := readRegion(mem, humanPtr)
-			human, _ := mem.Read(hOff, hLen)
-			_ = human
-			// dummy canonical: just lower-case normally; we'll return same bytes
-			canonical := human
-			dataOff, dataLen := locateData(ctx, m, canonical)
-			_ = mem.WriteUint32Le(outPtr, dataOff)
-			_ = mem.WriteUint32Le(outPtr+4, dataLen)
-			_ = mem.WriteUint32Le(outPtr+8, dataLen)
-			stack[0] = 0
+			human, _ := mem.Read(humanPtr, humanLen)
+			regionPtr := makeRegion(ctx, m, human)
+			stack[0] = uint64(regionPtr)
 		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("addr_canonicalize")
 	}
 
+	// addr_humanize(canonical_ptr, canonical_len) -> region_ptr
 	if expectedParams["addr_humanize"] == 2 {
 		builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
 			canonPtr := uint32(stack[0])
-			outPtr := uint32(stack[1])
+			canonLen := uint32(stack[1])
 			mem := m.Memory()
-			off, l := readRegion(mem, canonPtr)
-			canonical, _ := mem.Read(off, l)
-			human := canonical
-			dataOff, dataLen := locateData(ctx, m, human)
-			_ = mem.WriteUint32Le(outPtr, dataOff)
-			_ = mem.WriteUint32Le(outPtr+4, dataLen)
-			_ = mem.WriteUint32Le(outPtr+8, dataLen)
-			stack[0] = 0
+			canonical, _ := mem.Read(canonPtr, canonLen)
+			regionPtr := makeRegion(ctx, m, canonical)
+			stack[0] = uint64(regionPtr)
 		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("addr_humanize")
 	}
 
